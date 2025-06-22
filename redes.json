@@ -1,6 +1,7 @@
 [
   {
-    "prontuario": "2029701",
-    "dias": [1,2,3,4,5]    // segunda=1 … domingo=7; fim de semana (6,7)
+    "prontuario": "3029701",
+    "dias": [1, 2, 3, 4, 5],
+    "_comentario": "segunda=1 … domingo=7"
   }
 ]
