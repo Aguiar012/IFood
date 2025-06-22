@@ -1,20 +1,21 @@
 import json, time, logging, requests, os, smtplib, random
 from email.message import EmailMessage
 from bs4 import BeautifulSoup
+from datetime import datetime
 
 # ——— Configurações ———
-URL_HOME   = 'http://200.133.203.133/home'
-URL_SUBMIT = 'http://200.133.203.133/home'
-ARQUIVO    = 'redes.json'    # seu arquivo com todos os prontuários
-JITTER_MAX = 120             # até 2 minutos de espera aleatória entre envios
-TENTATIVAS = 3
-RETRY_SEC  = 30
+URL_HOME    = 'http://200.133.203.133/home'
+URL_SUBMIT  = 'http://200.133.203.133/home'
+ARQUIVO     = 'redes.json'
+JITTER_MAX  = 120
+TENTATIVAS  = 3
+RETRY_SEC   = 30
 
-EMAIL_USER  = os.getenv('EMAIL_USER')
-EMAIL_PASS  = os.getenv('EMAIL_PASS')
-SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
-SMTP_PORT   = int(os.getenv('SMTP_PORT', 587))
-TO_ADDRESS  = os.getenv('TO_ADDRESS')
+EMAIL_USER   = os.getenv('EMAIL_USER')
+EMAIL_PASS   = os.getenv('EMAIL_PASS')
+SMTP_SERVER  = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
+SMTP_PORT    = int(os.getenv('SMTP_PORT', 587))
+TO_ADDRESS   = os.getenv('TO_ADDRESS')
 
 logging.basicConfig(
     format='%(asctime)s %(levelname)s: %(message)s',
@@ -32,7 +33,7 @@ def send_email(subject, body):
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
 
-def load_prontuarios():
+def load_alunos():
     with open(ARQUIVO, 'r') as f:
         return json.load(f)
 
@@ -49,18 +50,23 @@ def check_feedback(html):
     return True, None
 
 def main():
+    hoje = datetime.now().isoweekday()  # 1=segunda … 7=domingo
     resultados = []
     sess = requests.Session()
 
-    for pront in load_prontuarios():
-        # jitter antes de cada envio para não disparar todos juntos
+    for aluno in load_alunos():
+        pront = aluno['prontuario']
+        dias = aluno.get('dias', [])
+        if hoje not in dias:
+            logging.info(f'{pront}: pula hoje (dia {hoje})')
+            continue
+
+        # jitter antes de cada envio
         espera = random.randint(0, JITTER_MAX)
-        logging.info(f'{pront}: esperando {espera}s antes do envio')
+        logging.info(f'{pront}: esperando {espera}s antes de enviar')
         time.sleep(espera)
 
-        sucesso = False
-        detalhe_falha = None
-
+        sucesso, detalhe_falha = False, None
         for i in range(1, TENTATIVAS+1):
             try:
                 r = submit_prontuario(sess, pront)
@@ -78,20 +84,22 @@ def main():
 
         resultados.append((pront, sucesso, detalhe_falha))
 
-    # montar corpo do e-mail
-    ok_list = [p for p, s, _ in resultados if s]
-    fail_list = [(p, d) for p, s, d in resultados if not s]
+    # gerar relatório
+    enviados = [p for p, s, _ in resultados if s]
+    falhas   = [(p, d) for p, s, d in resultados if not s]
 
-    body = []
-    body.append(f'Almoços solicitados com sucesso: {len(ok_list)}/{len(resultados)}')
-    if ok_list:
-        body.append('→ ' + ', '.join(ok_list))
-    if fail_list:
-        body.append(f'\nFalhas ({len(fail_list)}):')
-        for pront, msg in fail_list:
-            body.append(f'  • {pront}: {msg}')
+    body = [
+        f'Almoços solicitados com sucesso: {len(enviados)}/{len(resultados)}'
+    ]
+    if enviados:
+        body.append('→ ' + ', '.join(enviados))
+    if falhas:
+        body.append(f'\nFalhas ({len(falhas)}):')
+        for p, d in falhas:
+            body.append(f'  • {p}: {d}')
 
     send_email('Relatório Auto-Almoço', '\n'.join(body))
+
 
 if __name__ == '__main__':
     main()
