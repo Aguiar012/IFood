@@ -1,0 +1,29 @@
+name: AlmoPT
+
+on:
+  schedule:
+    # 12:00 BRT = 15:00 UTC, seg–sex
+    - cron: '0 15 * * 1-5'
+
+jobs:
+  almoco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install deps
+        run: pip install requests beautifulsoup4
+
+      - name: Run AlmoPT
+        env:
+          EMAIL_USER:  ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS:  ${{ secrets.EMAIL_PASS }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT:   ${{ secrets.SMTP_PORT }}
+          TO_ADDRESS:  ${{ secrets.TO_ADDRESS }}
+        run: python auto_pedido.py
