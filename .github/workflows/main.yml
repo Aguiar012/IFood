@@ -1,6 +1,7 @@
 name: AlmoPT
 
 on:
+  workflow_dispatch:
   schedule:
     # 12:00 BRT = 15:00 UTC, seg–sex
     - cron: '0 15 * * 1-5'
