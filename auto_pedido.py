@@ -1,13 +1,15 @@
 import json, time, logging, random, os, smtplib, requests
 from email.message import EmailMessage
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta 
+
+datetime.now() - timedelta(hours=3) # horário de brasilia
 
 # ─── Configurações gerais ───────────────────────────────────────────────────────
 URL_HOME    = 'http://200.133.203.133/home'
 ARQUIVO     = 'redes.json'
 JITTER_MAX  = 120
-TENTATIVAS  = 3
+TENTATIVAS  = 2
 RETRY_SEC   = 30
 TIMEOUT_SEC = 10
 
@@ -58,13 +60,13 @@ def enviar_prontuario(sess, prontuario: str):
 def parse_feedback(html: str):
     soup = BeautifulSoup(html, 'html.parser')
 
-    # Erro (vermelho)
+    # Erro vermelho
     erro_div = soup.select_one('.alert.alert-danger.alert-dismissable.fade.in')
     if erro_div:
         msg = erro_div.get_text(" ", strip=True)
         return False, msg
 
-    # Sucesso (verde)
+    # Sucesso verde
     ok_div = soup.select_one('.alert.alert-success.alert-dismissable.fade.in')
     if ok_div:
         msg = ok_div.get_text(" ", strip=True)
@@ -83,7 +85,7 @@ def main():
             continue
 
         pront = aluno['prontuario']
-        time.sleep(random.randint(0, JITTER_MAX))  # jitter
+        time.sleep(random.randint(0, JITTER_MAX))  # jitter, tempo aleatório
         inicio = datetime.now().strftime('%H:%M:%S')
 
         sucesso, mensagem = False, ''
@@ -101,15 +103,15 @@ def main():
         fim = datetime.now().strftime('%H:%M:%S')
         detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
 
-    # ── Monta e envia o relatório ───────────────────────────────────────────────
+    # ── Monta email e envia o relatório ───────────────────────────────────────────────
     linhas = ['Relatório Auto-Almoço — ' + datetime.now().strftime('%d/%m/%Y')]
     ok_total = sum(1 for _, s, *_ in detalhes if s)
     linhas.append(f'Sucesso: {ok_total}/{len(detalhes)}\n')
-    linhas.append('Pront | Status | Início→Fim | Tent | Mensagem')
+    linhas.append('Prontuário | Status | Começou -> Terminou | Tentativas | Mensagem')
     linhas.append('-' * 72)
 
     for pront, ok, msg, ini, fim, tent in detalhes:
-        status = 'OK ' if ok else 'FAIL'
+        status = 'OK ' if ok else 'FALHOU'
         linhas.append(f'{pront} | {status} | {ini}→{fim} | {tent} | {msg}')
 
     send_email('Relatório Auto-Almoço', '\n'.join(linhas))
