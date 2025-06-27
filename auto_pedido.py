@@ -1,12 +1,11 @@
-import json, time, logging, requests, os, smtplib, random
+import json, time, logging, random, os, smtplib, requests
 from email.message import EmailMessage
 from bs4 import BeautifulSoup
 from datetime import datetime
 
+# ─── Configurações gerais ───────────────────────────────────────────────────────
 URL_HOME    = 'http://200.133.203.133/home'
-URL_SUBMIT  = 'http://200.133.203.133/home'   # AJUSTE AQUI após inspeção!
 ARQUIVO     = 'redes.json'
-
 JITTER_MAX  = 120
 TENTATIVAS  = 3
 RETRY_SEC   = 30
@@ -21,74 +20,98 @@ TO_ADDRESS   = os.getenv('TO_ADDRESS')
 logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s',
                     level=logging.INFO)
 
-def send_email(subject, body):
+# ─── Utilidades de e-mail ───────────────────────────────────────────────────────
+def send_email(subject: str, body: str):
     msg = EmailMessage()
-    msg['From'] = EMAIL_USER
-    msg['To'] = TO_ADDRESS
-    msg['Subject'] = subject
+    msg['From'], msg['To'], msg['Subject'] = EMAIL_USER, TO_ADDRESS, subject
     msg.set_content(body)
     with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
         smtp.starttls()
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
 
+# ─── Leitura do JSON ────────────────────────────────────────────────────────────
 def load_alunos():
     with open(ARQUIVO, 'r') as f:
         return json.load(f)
 
-def enviar(sess, pront):
-    """Submete o prontuário. Ajuste para GET se necessário."""
-    sess.get(URL_HOME, timeout=TIMEOUT_SEC)           # para pegar cookies / token
-    return sess.post(URL_SUBMIT,
-                     data={'prontuario': pront},
-                     timeout=TIMEOUT_SEC)
+# ─── Funções de envio ───────────────────────────────────────────────────────────
+def get_csrf_token(sess):
+    """Faz GET em /home e extrai o valor do input 'csrfmiddlewaretoken'."""
+    resp = sess.get(URL_HOME, timeout=TIMEOUT_SEC)
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    token_input = soup.find('input', {'name': 'csrfmiddlewaretoken'})
+    if not token_input:
+        raise RuntimeError('CSRF token não encontrado na página')
+    return token_input['value']
 
-def parse_result(html):
+def enviar_prontuario(sess, prontuario: str):
+    token = get_csrf_token(sess)
+    payload = {
+        'csrfmiddlewaretoken': token,
+        'prontuario': prontuario,
+        'tipo': '1'
+    }
+    headers = {'Referer': URL_HOME}   # alguns servidores exigem
+    return sess.post(URL_HOME, data=payload, headers=headers, timeout=TIMEOUT_SEC)
+
+def parse_feedback(html: str):
     soup = BeautifulSoup(html, 'html.parser')
-    sucesso = soup.select_one('.alert.alert-success')
-    erro     = soup.select_one('.alert.alert-danger')
-    if sucesso:
-        return True, sucesso.get_text(strip=True)
-    if erro:
-        return False, erro.get_text(strip=True)
-    return False, 'Sem mensagem de sucesso nem erro - possivelmente endpoint errado'
 
+    # Erro (vermelho)
+    erro_div = soup.select_one('.alert.alert-danger.alert-dismissable.fade.in')
+    if erro_div:
+        msg = erro_div.get_text(" ", strip=True)
+        return False, msg
+
+    # Sucesso (verde)
+    ok_div = soup.select_one('.alert.alert-success.alert-dismissable.fade.in')
+    if ok_div:
+        msg = ok_div.get_text(" ", strip=True)
+        return True, msg
+
+    return False, 'Nenhum alerta de sucesso/erro encontrado'
+
+# ─── Execução principal ─────────────────────────────────────────────────────────
 def main():
     hoje = datetime.now().isoweekday()  # 1=seg … 7=dom
-    detalhes = []                       # lista de tuplas p/ e-mail
+    detalhes = []
     sess = requests.Session()
 
     for aluno in load_alunos():
-        pront = aluno['prontuario']
         if hoje not in aluno.get('dias', []):
             continue
 
-        time.sleep(random.randint(0, JITTER_MAX))
-        ts_inicio = datetime.now().strftime('%H:%M:%S')
+        pront = aluno['prontuario']
+        time.sleep(random.randint(0, JITTER_MAX))  # jitter
+        inicio = datetime.now().strftime('%H:%M:%S')
 
-        ok, msg, tentativa = False, '', 0
+        sucesso, mensagem = False, ''
         for tentativa in range(1, TENTATIVAS + 1):
             try:
-                r = enviar(sess, pront)
-                ok, msg = parse_result(r.text)
-                if ok:
+                r = enviar_prontuario(sess, pront)
+                sucesso, mensagem = parse_feedback(r.text)
+                if sucesso:
                     break
-                raise ValueError(msg)
+                raise ValueError(mensagem)
             except Exception as e:
-                msg = str(e)
+                mensagem = str(e)
                 time.sleep(RETRY_SEC)
 
-        ts_fim = datetime.now().strftime('%H:%M:%S')
-        detalhes.append((pront, ok, msg, ts_inicio, ts_fim, tentativa))
+        fim = datetime.now().strftime('%H:%M:%S')
+        detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
 
-    # ───────────── Email ─────────────
-    linhas = ['Relatório de envios ' + datetime.now().strftime('%d/%m/%Y')]
+    # ── Monta e envia o relatório ───────────────────────────────────────────────
+    linhas = ['Relatório Auto-Almoço — ' + datetime.now().strftime('%d/%m/%Y')]
+    ok_total = sum(1 for _, s, *_ in detalhes if s)
+    linhas.append(f'Sucesso: {ok_total}/{len(detalhes)}\n')
+    linhas.append('Pront | Status | Início→Fim | Tent | Mensagem')
+    linhas.append('-' * 72)
+
     for pront, ok, msg, ini, fim, tent in detalhes:
-        status = 'OK' if ok else 'FAIL'
-        linhas.append(f'{pront} | {status} | {ini}→{fim} | T{tent} | {msg}')
+        status = 'OK ' if ok else 'FAIL'
+        linhas.append(f'{pront} | {status} | {ini}→{fim} | {tent} | {msg}')
 
-    sucesso_total = sum(1 for _, ok, *_ in detalhes if ok)
-    linhas.insert(1, f'Sucesso: {sucesso_total}/{len(detalhes)}\n')
     send_email('Relatório Auto-Almoço', '\n'.join(linhas))
 
 if __name__ == '__main__':
