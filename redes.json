@@ -1,17 +1,17 @@
 [
   {
     "prontuario": "3029701",
-    "dias": [],
+    "dias": [1,2,3,4,5],
     "_comentario": "segunda=1 … domingo=7"
   },
     {
     "prontuario": "3030466",
-    "dias": [],
+    "dias": [1,2,3,5],
     "_comentario": "Leo"
   },
     {
     "prontuario": "3029778",
-    "dias": [],
+    "dias": [1,2,3,5],
     "_comentario": "Lucas Campelo"
   }
 ]
