@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # 12:00 BRT = 15:00 UTC, seg–sex
-    - cron: '0 15 * * 1-5'
+    - cron: '0 9 * * 1-5'
 
 jobs:
   almoco:
