@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 datetime.now() - timedelta(hours=3) # horário de brasilia
 
-# ─── Configurações gerais ───────────────────────────────────────────────────────
+#  Configurações gerais
 URL_HOME    = 'http://200.133.203.133/home'
 ARQUIVO     = 'redes.json'
 JITTER_MAX  = 120
@@ -22,7 +22,7 @@ TO_ADDRESS   = os.getenv('TO_ADDRESS')
 logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s',
                     level=logging.INFO)
 
-# ─── Utilidades de e-mail ───────────────────────────────────────────────────────
+# Utilidades de e-mail
 def send_email(subject: str, body: str):
     msg = EmailMessage()
     msg['From'], msg['To'], msg['Subject'] = EMAIL_USER, TO_ADDRESS, subject
@@ -32,12 +32,12 @@ def send_email(subject: str, body: str):
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
 
-# ─── Leitura do JSON ────────────────────────────────────────────────────────────
+#  Leitura do JSON 
 def load_alunos():
     with open(ARQUIVO, 'r') as f:
         return json.load(f)
 
-# ─── Funções de envio ───────────────────────────────────────────────────────────
+#  Funções de envio 
 def get_csrf_token(sess):
     """Faz GET em /home e extrai o valor do input 'csrfmiddlewaretoken'."""
     resp = sess.get(URL_HOME, timeout=TIMEOUT_SEC)
@@ -74,7 +74,7 @@ def parse_feedback(html: str):
 
     return False, 'Nenhum alerta de sucesso/erro encontrado'
 
-# ─── Execução principal ─────────────────────────────────────────────────────────
+#  Execução principal 
 def main():
     hoje = datetime.now().isoweekday()  # 1=seg … 7=dom
     detalhes = []
@@ -103,7 +103,7 @@ def main():
         fim = datetime.now().strftime('%H:%M:%S')
         detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
 
-    # ── Monta email e envia o relatório ───────────────────────────────────────────────
+    #  Monta email e envia o relatório 
     linhas = ['Relatório Auto-Almoço — ' + datetime.now().strftime('%d/%m/%Y')]
     ok_total = sum(1 for _, s, *_ in detalhes if s)
     linhas.append(f'Sucesso: {ok_total}/{len(detalhes)}\n')
