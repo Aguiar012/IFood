@@ -26,12 +26,22 @@ jobs:
           python-version: "3.x"
       - run: |
           pip install --upgrade pip
-          if [ "${{ github.event.inputs.cmd }}" = "add" ]; then
-            python gerenciar_redes.py add --prontuario "${{ github.event.inputs.prontuario }}" --dias ${{ github.event.inputs.dias }} --comentario "${{ github.event.inputs.comentario }}"
-          elif [ "${{ github.event.inputs.cmd }}" = "rm" ]; then
-            python gerenciar_redes.py rm --prontuario "${{ github.event.inputs.prontuario }}"
-          else
-            python gerenciar_redes.py list
+          case "${{ github.event.inputs.cmd }}" in
+            add)
+              python gerenciar_redes.py add --prontuario "${{ github.event.inputs.prontuario }}" --dias ${{ github.event.inputs.dias }} --comentario "${{ github.event.inputs.comentario }}"
+              ;;
+            rm)
+              python gerenciar_redes.py rm --prontuario "${{ github.event.inputs.prontuario }}"
+              ;;
+            list)
+              python gerenciar_redes.py list
+              ;;
+            *)
+              echo "Comando inválido: ${{ github.event.inputs.cmd }}"
+              exit 1
+              ;;
+          esac
+
       - run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
