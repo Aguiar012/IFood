@@ -1,0 +1,13 @@
+{
+  "name": "wpp-actions",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "send": "node send_whatsapp.js",
+    "login": "node login_once.js"
+  },
+  "dependencies": {
+    "whatsapp-web.js": "^1.26.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
