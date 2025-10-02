@@ -3,8 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "send": "node send_whatsapp.js",
-    "login": "node login_once.js"
+    "send": "node send_whatsapp.js"
   },
   "dependencies": {
     "whatsapp-web.js": "^1.26.0",
