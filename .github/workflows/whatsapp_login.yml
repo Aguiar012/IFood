@@ -1,0 +1,37 @@
+name: WhatsApp Login (gera sessão)
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Start login to capture QR and save session
+        env:
+          WHATSAPP_TO: '5511999999999' # dummy; não envia nada aqui
+          MSG_FILE: /tmp/blank.txt
+          SESSION_DIR: .wwebjs_auth
+        run: |
+          echo 'Login - escaneie o QR no próximo step (Logs)'
+          echo ' ' > /tmp/blank.txt
+          # Rodamos o script por 60s só para gerar QR e gravar sessão ao autenticar.
+          timeout 60s node send_whatsapp.js || true
+
+      - name: List session dir
+        run: ls -R .wwebjs_auth || true
+
+      - name: Cache session
+        uses: actions/cache/save@v4
+        with:
+          path: .wwebjs_auth
+          key: wpp-session-cache
