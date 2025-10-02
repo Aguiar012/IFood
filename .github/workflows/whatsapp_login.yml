@@ -14,23 +14,15 @@ jobs:
           node-version: '20'
 
       - name: Install deps
-        run: npm ci
+        run: npm install
 
-      - name: Start login to capture QR and save session
+      - name: Render QR in terminal (2 minutos)
         env:
-          WHATSAPP_TO: '5511999999999' # dummy; não envia nada aqui
-          MSG_FILE: /tmp/blank.txt
           SESSION_DIR: .wwebjs_auth
         run: |
-          echo 'Login - escaneie o QR no próximo step (Logs)'
-          echo ' ' > /tmp/blank.txt
-          # Rodamos o script por 60s só para gerar QR e gravar sessão ao autenticar.
-          timeout 60s node send_whatsapp.js || true
+          node -e "const {Client,LocalAuth}=require('whatsapp-web.js');const qrt=require('qrcode-terminal');const c=new Client({authStrategy:new LocalAuth({dataPath:process.env.SESSION_DIR}),puppeteer:{headless:true,args:['--no-sandbox','--disable-setuid-sandbox']}});c.on('qr',qr=>{console.log('ESCANEIE O QR ABAIXO:'); qrt.generate(qr,{small:true});});c.on('ready',()=>{console.log('LOGIN OK'); process.exit(0)});c.initialize(); setTimeout(()=>process.exit(0),120000);"
 
-      - name: List session dir
-        run: ls -R .wwebjs_auth || true
-
-      - name: Cache session
+      - name: Save session cache
         uses: actions/cache/save@v4
         with:
           path: .wwebjs_auth
