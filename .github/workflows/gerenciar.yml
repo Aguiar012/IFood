@@ -16,6 +16,9 @@ on:
         description: "Comentário"
         required: false
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
