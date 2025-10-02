@@ -1,0 +1,40 @@
+name: Gerenciar redes.json
+
+on:
+  workflow_dispatch:
+    inputs:
+      cmd:
+        description: "Comando (add/rm/list)"
+        required: true
+      prontuario:
+        description: "Prontuário"
+        required: false
+      dias:
+        description: "Dias (ex: 1 2 3)"
+        required: false
+      comentario:
+        description: "Comentário"
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+      - run: |
+          pip install --upgrade pip
+          if [ "${{ github.event.inputs.cmd }}" = "add" ]; then
+            python gerenciar_redes.py add --prontuario "${{ github.event.inputs.prontuario }}" --dias ${{ github.event.inputs.dias }} --comentario "${{ github.event.inputs.comentario }}"
+          elif [ "${{ github.event.inputs.cmd }}" = "rm" ]; then
+            python gerenciar_redes.py rm --prontuario "${{ github.event.inputs.prontuario }}"
+          else
+            python gerenciar_redes.py list
+      - run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add redes.json
+          git commit -m "Update redes.json via workflow" || echo "Nada para commitar"
+          git push
