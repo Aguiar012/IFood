@@ -4,8 +4,8 @@ const fs = require('fs');
 
 const MODE = process.env.MODE || 'send';                  // 'login' ou 'send'
 const SESSION_DIR = process.env.SESSION_DIR || '.wwebjs_auth';
-const CLIENT_ID = process.env.CLIENT_ID || 'almo-pt';     // tem que ser IGUAL no login e no send
-const WHATSAPP_TO = process.env.WHATSAPP_TO;              // ex: 5511932291930@c.us
+const CLIENT_ID = process.env.CLIENT_ID || 'almo-pt';     // IGUAL no login e no send
+const WHATSAPP_TO = process.env.WHATSAPP_TO;              // ex: 5511932291930
 const MSG_FILE = process.env.MSG_FILE || '/tmp/relatorio.txt';
 
 console.log(`MODO: ${MODE}`);
@@ -14,23 +14,27 @@ console.log(`CLIENT_ID: ${CLIENT_ID}`);
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: SESSION_DIR, clientId: CLIENT_ID }),
-  // NUNCA defina puppeteer.userDataDir manualmente com LocalAuth
   puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] },
+
+  // Evita o bug do LocalWebCache pegando a versão suportada remotamente
+  webVersionCache: {
+    type: 'remote',
+    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/last.json'
+  }
 });
 
-client.on('qr', (qr) => {
-  // Se aparecer QR no send, a sessão não foi restaurada
+client.on('qr', () => {
   console.log('QR SOLICITADO.');
   if (MODE === 'send') {
-    console.error('ERRO: QR solicitado no modo send -> sessão NÃO restaurada/compatível.');
+    console.error('ERRO: QR no modo send -> sessão NÃO restaurada/compatível.');
     process.exit(1);
   }
 });
 
 client.on('ready', async () => {
   console.log('READY OK');
+
   if (MODE === 'login') {
-    // Só garantir que logou e salvará no cache ao fim do job
     process.exit(0);
   }
 
