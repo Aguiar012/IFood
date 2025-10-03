@@ -26,7 +26,7 @@ jobs:
           node-version: "20"
 
       - run: rm -f package-lock.json
-      - run: npm ci
+      - run: npm install
 
       - name: Restore WhatsApp session (latest)
         uses: actions/cache/restore@v4
