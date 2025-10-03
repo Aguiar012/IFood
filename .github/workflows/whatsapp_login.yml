@@ -16,11 +16,25 @@ jobs:
       - name: Install deps
         run: npm install
 
-      - name: Render QR in terminal (2 minutos)
+      - name: Render QR em ASCII e aguardar login
         env:
           SESSION_DIR: .wwebjs_auth
         run: |
-          node -e "const {Client,LocalAuth}=require('whatsapp-web.js');const qrt=require('qrcode-terminal');const c=new Client({authStrategy:new LocalAuth({dataPath:process.env.SESSION_DIR}),puppeteer:{headless:true,args:['--no-sandbox','--disable-setuid-sandbox']}});c.on('qr',qr=>{console.log('ESCANEIE O QR ABAIXO:'); qrt.generate(qr,{small:true});});c.on('ready',()=>{console.log('LOGIN OK'); process.exit(0)});c.initialize(); setTimeout(()=>process.exit(0),120000);"
+          node -e "
+            const {Client, LocalAuth} = require('whatsapp-web.js');
+            const qrt = require('qrcode-terminal');
+            const c = new Client({
+              authStrategy: new LocalAuth({ dataPath: process.env.SESSION_DIR }),
+              puppeteer: { headless: true, args: ['--no-sandbox','--disable-setuid-sandbox'] }
+            });
+            c.on('qr', qr => { console.log('ESCANEIE O QR ABAIXO:'); qrt.generate(qr,{small:true}); });
+            c.on('ready', () => { console.log('LOGIN OK'); process.exit(0); });
+            c.initialize();
+            setTimeout(() => { console.log('TIMEOUT: não logou em 2 min'); process.exit(1); }, 120000);
+          "
+
+      - name: Conferir conteúdo da sessão
+        run: ls -R .wwebjs_auth
 
       - name: Save session cache
         uses: actions/cache/save@v4
