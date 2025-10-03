@@ -1,9 +1,10 @@
 {
-  "name": "almo-pt-wpp",
+  "name": "almo-pt",
   "private": true,
   "type": "module",
   "dependencies": {
-    "whatsapp-web.js": "1.23.0",
-    "qrcode-terminal": "0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "whatsapp-web.js": "^1.26.0",
+    "puppeteer": "^24.15.0"
   }
 }
