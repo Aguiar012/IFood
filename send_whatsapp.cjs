@@ -1,72 +1,59 @@
-// send_whatsapp.cjs
 const fs = require('fs');
-const qrcode = require('qrcode-terminal');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
-const MODO = process.env.MODO || 'send';
+const CLIENT_ID = process.env.CLIENT_ID || 'almo-pt';
 const SESSION_DIR = process.env.SESSION_DIR || '.wwebjs_auth';
-const CLIENT_ID = process.env.CLIENT_ID || 'default';
+const TO = process.env.WHATSAPP_TO;           // e.g. "5511972093213"
+const TEXT = process.env.WHATSAPP_TEXT || 'Teste automático';
 
-const TO = process.env.WHATSAPP_TO || '';
-const MSG_FILE = process.env.WHATSAPP_MSG_FILE || '';
-const MSG_TEXT = process.env.WHATSAPP_TEXT || '';
+console.log('MODO: send');
+console.log('SESSION_DIR:', SESSION_DIR);
+console.log('CLIENT_ID:', CLIENT_ID);
 
-console.log(`MODO: ${MODO}`);
-console.log(`SESSION_DIR: ${SESSION_DIR}`);
-console.log(`CLIENT_ID: ${CLIENT_ID}`);
+if (!TO) {
+  console.error('Faltou WHATSAPP_TO');
+  process.exit(2);
+}
+
+if (!fs.existsSync(`${SESSION_DIR}/session-${CLIENT_ID}`)) {
+  console.error('ERRO: sessão não encontrada. Rode o workflow de LOGIN primeiro.');
+  process.exit(3);
+}
 
 const client = new Client({
-  authStrategy: new LocalAuth({
-    dataPath: SESSION_DIR,
-    clientId: CLIENT_ID,
-  }),
+  authStrategy: new LocalAuth({ dataPath: SESSION_DIR, clientId: CLIENT_ID }),
   puppeteer: {
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox']
   }
 });
 
-// Em LOGIN mostramos o QR na saída; em SEND, QR = erro (sem sessão)
-client.on('qr', (qr) => {
-  if (MODO === 'login') {
-    console.log('QR GERADO: ESCANEIE ABAIXO');
-    qrcode.generate(qr, { small: true });
-  } else {
-    console.error('ERRO: QR no modo send -> sessão NÃO restaurada/compatível.');
-    process.exit(1);
-  }
+let qrSeen = false;
+client.on('qr', () => {
+  qrSeen = true;
+  console.error('ERRO: QR no modo send -> sessão NÃO restaurada/compatível. Rode LOGIN.');
 });
 
 client.on('ready', async () => {
-  console.log('READY OK');
-  if (MODO === 'login') {
-    console.log('Login finalizado. Pode fechar.');
-    process.exit(0);
-    return;
+  if (qrSeen) {
+    // Não envia nada se precisou QR
+    process.exit(4);
   }
-
-  // MODO SEND
   try {
-    if (!TO) throw new Error('WHATSAPP_TO vazio.');
-    const text = MSG_TEXT || (MSG_FILE ? fs.readFileSync(MSG_FILE, 'utf8') : '');
-    if (!text) throw new Error('Mensagem vazia.');
+    // opcional: verifique se o número está no WhatsApp
+    const isUser = await client.isRegisteredUser(`${TO}@c.us`);
+    if (!isUser) {
+      console.error('Número não está no WhatsApp (isRegisteredUser=false).');
+      process.exit(5);
+    }
 
-    // Resolve o ID canônico do número (funciona mesmo sem estar em contatos)
-    const id = await client.getNumberId(TO);
-    if (!id) throw new Error(`Número inválido ou sem WhatsApp: ${TO}`);
-
-    await client.sendMessage(id._serialized, text.trim());
+    await client.sendMessage(`${TO}@c.us`, TEXT);
     console.log('Mensagem enviada.');
-    process.exit(0);
-  } catch (err) {
-    console.error('FALHA NO ENVIO:', err.message);
-    process.exit(1);
+    setTimeout(() => process.exit(0), 1500);
+  } catch (e) {
+    console.error('Falha ao enviar:', e);
+    process.exit(6);
   }
-});
-
-client.on('auth_failure', (m) => {
-  console.error('Falha na autenticação:', m);
-  process.exit(1);
 });
 
 client.initialize();
