@@ -1,10 +1,16 @@
 name: login
+
 on:
   workflow_dispatch:
+    inputs:
+      client_id:
+        description: "CLIENT_ID da sessão"
+        default: "almo-pt"
+        required: true
 
 env:
+  CLIENT_ID: ${{ inputs.client_id }}
   SESSION_DIR: .wwebjs_auth
-  CLIENT_ID: almo-pt
 
 jobs:
   login:
@@ -16,31 +22,14 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install deps
-        run: npm install
+      - run: npm install
 
-      # (opcional) restaura sessão antiga p/ evitar pedir QR se já existir
-      - name: Restore session cache (optional)
-        uses: actions/cache/restore@v4
-        with:
-          path: .wwebjs_auth
-          key: wpp-session-${{ env.CLIENT_ID }}-${{ github.run_id }}
-          restore-keys: |
-            wpp-session-${{ env.CLIENT_ID }}-
-
-      - name: Run login (vai mostrar QR se precisar)
+      - name: Login (gera QR no log)
         run: node send_whatsapp.cjs
         env:
           MODO: login
-          SESSION_DIR: ${{ env.SESSION_DIR }}
-          CLIENT_ID: ${{ env.CLIENT_ID }}
 
-      - name: Check session folder
-        run: |
-          ls -R .wwebjs_auth || (echo "SEM SESSAO apos login"; exit 1)
-
-      # AQUI É O PULO DO GATO: SALVAR o cache da sessão
-      - name: Save session cache
+      - name: Salvar cache da sessão
         uses: actions/cache/save@v4
         with:
           path: .wwebjs_auth
