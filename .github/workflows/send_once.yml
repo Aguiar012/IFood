@@ -1,4 +1,4 @@
-name: WPP Send (simple)
+name: Enviar mensagem simples no WhatsApp
 
 on:
   workflow_dispatch:
@@ -18,42 +18,31 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install Node deps
+      - name: Install deps
         run: npm install
 
-      - name: Restore WhatsApp session (latest)
+      - name: Restore RemoteAuth store
         uses: actions/cache/restore@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-dummy
-          restore-keys: |
-            wpp-session-
+          key: wpp-remote-${{ secrets.WHATSAPP_TO }}
 
-      - name: Normalizar nome da sessão
+      - name: Verificar store
         run: |
-          if [ -d ".wwebjs_auth/session-session" ] && [ ! -d ".wwebjs_auth/session" ]; then
-            echo "Renomeando .wwebjs_auth/session-session -> .wwebjs_auth/session"
-            mv .wwebjs_auth/session-session .wwebjs_auth/session
-          fi
-          echo "Estrutura atual:"
-          find .wwebjs_auth -maxdepth 2 -type d | sort
-
-      - name: "Diagnostico - listar sessao restaurada"
-        run: |
-          if [ -d ".wwebjs_auth" ]; then
-            echo "Sessao encontrada:"
-            ls -R .wwebjs_auth
-          else
-            echo "Sessao NAO encontrada. Rode o workflow de login."
+          if [ ! -d ".wwebjs_auth" ]; then
+            echo "Store não encontrada. Rode o workflow de LOGIN."
             exit 1
           fi
+          find .wwebjs_auth -maxdepth 2 -type d | sort || true
 
       - name: Build msg
         run: echo "${{ github.event.inputs.text }}" > /tmp/relatorio.txt
 
-      - name: Send message via WhatsApp Web
+      - name: Send message via WhatsApp (RemoteAuth)
         env:
+          MODE: send
+          SESSION_DIR: .wwebjs_auth
+          CLIENT_ID: almo-pt
           WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}
           MSG_FILE: /tmp/relatorio.txt
-          SESSION_DIR: .wwebjs_auth
         run: node send_whatsapp.js
