@@ -1,107 +1,72 @@
 // send_whatsapp.cjs
-const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const fs = require('fs');
+const qrcode = require('qrcode-terminal');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 
-const MODE = process.env.MODE || 'send';
+const MODO = process.env.MODO || 'send';
 const SESSION_DIR = process.env.SESSION_DIR || '.wwebjs_auth';
-const CLIENT_ID = process.env.CLIENT_ID || 'almo-pt';
-const WHATSAPP_TO = process.env.WHATSAPP_TO || '';
-const MSG_FILE = process.env.MSG_FILE || '/tmp/relatorio.txt';
+const CLIENT_ID = process.env.CLIENT_ID || 'default';
 
-console.log(`MODO: ${MODE}`);
+const TO = process.env.WHATSAPP_TO || '';
+const MSG_FILE = process.env.WHATSAPP_MSG_FILE || '';
+const MSG_TEXT = process.env.WHATSAPP_TEXT || '';
+
+console.log(`MODO: ${MODO}`);
 console.log(`SESSION_DIR: ${SESSION_DIR}`);
 console.log(`CLIENT_ID: ${CLIENT_ID}`);
 
-function onlyDigits(s) { return (s || '').replace(/\D/g, ''); }
-
-const acks = new Map();
-
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: SESSION_DIR, clientId: CLIENT_ID }),
-  puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] },
-  webVersionCache: {
-    type: 'remote',
-    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/last.json'
+  authStrategy: new LocalAuth({
+    dataPath: SESSION_DIR,
+    clientId: CLIENT_ID,
+  }),
+  puppeteer: {
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   }
 });
 
+// Em LOGIN mostramos o QR na saída; em SEND, QR = erro (sem sessão)
 client.on('qr', (qr) => {
-  console.log('QR GERADO: ESCANEIE ABAIXO');
-  qrcode.generate(qr, { small: true });
-  if (MODE === 'send') {
+  if (MODO === 'login') {
+    console.log('QR GERADO: ESCANEIE ABAIXO');
+    qrcode.generate(qr, { small: true });
+  } else {
     console.error('ERRO: QR no modo send -> sessão NÃO restaurada/compatível.');
     process.exit(1);
   }
 });
 
-client.on('auth_failure', (m) => console.error('AUTH FAILURE:', m));
-client.on('change_state', (s) => console.log('STATE:', s));
-client.on('disconnected', (r) => console.error('DISCONNECTED:', r));
-client.on('message_ack', (msg, ack) => {
-  if (msg.fromMe) {
-    console.log('ACK update:', ack, 'MessageID:', msg.id.id);
-    acks.set(msg.id.id, ack); // 1=enviado, 2=entregue, 3=lido
+client.on('ready', async () => {
+  console.log('READY OK');
+  if (MODO === 'login') {
+    console.log('Login finalizado. Pode fechar.');
+    process.exit(0);
+    return;
+  }
+
+  // MODO SEND
+  try {
+    if (!TO) throw new Error('WHATSAPP_TO vazio.');
+    const text = MSG_TEXT || (MSG_FILE ? fs.readFileSync(MSG_FILE, 'utf8') : '');
+    if (!text) throw new Error('Mensagem vazia.');
+
+    // Resolve o ID canônico do número (funciona mesmo sem estar em contatos)
+    const id = await client.getNumberId(TO);
+    if (!id) throw new Error(`Número inválido ou sem WhatsApp: ${TO}`);
+
+    await client.sendMessage(id._serialized, text.trim());
+    console.log('Mensagem enviada.');
+    process.exit(0);
+  } catch (err) {
+    console.error('FALHA NO ENVIO:', err.message);
+    process.exit(1);
   }
 });
 
-client.on('ready', async () => {
-  console.log('READY OK');
-  console.log('SENDER:', client.info.wid?._serialized, '| NAME:', client.info.pushname || '');
-
-  if (MODE === 'login') process.exit(0);
-
-  // 1) Sanitiza e valida destino
-  let num = onlyDigits(WHATSAPP_TO);
-  if (!num) {
-    console.error('Faltou WHATSAPP_TO (somente dígitos, com DDI).');
-    process.exit(1);
-  }
-  if (num.length < 11) {
-    console.warn('Aviso: número curto. Use DDI+DDD+número, ex: 5511999999999');
-  }
-
-  const numberId = await client.getNumberId(num);
-  if (!numberId) {
-    console.error('Destino NÃO tem WhatsApp ou está inválido:', num);
-    process.exit(1);
-  }
-  const to = numberId._serialized; // ex: 5511999999999@c.us
-  console.log('DESTINO RESOLVIDO:', to);
-
-  // 2) Evita auto-DM (enviar para o mesmo número logado)
-  const me = client.info.wid?._serialized;
-  if (me && me.split('@')[0] === to.split('@')[0]) {
-    console.error('Você está tentando enviar para o MESMO número da sessão. WhatsApp Web não entrega auto-DM.');
-    process.exit(1);
-  }
-
-  // 3) Texto
-  const text = fs.existsSync(MSG_FILE) ? fs.readFileSync(MSG_FILE, 'utf8') : 'Mensagem vazia';
-
-  // 4) Envia e espera ACK por até 15s
-  const msg = await client.sendMessage(to, text);
-  const id = msg.id.id;
-  console.log('Mensagem enviada. MessageID:', id);
-
-  const deadline = Date.now() + 15000;
-  while (Date.now() < deadline) {
-    const v = acks.get(id);
-    if (v >= 1) break; // já subiu para "enviado ao servidor"
-    await new Promise(r => setTimeout(r, 300));
-  }
-  const finalAck = acks.get(id);
-  console.log('ACK final:', finalAck === undefined ? 'none' : finalAck);
-
-  // tenta logar o assunto do chat só para termos rastro
-  try {
-    const chat = await msg.getChat();
-    console.log('CHAT NAME:', chat.name || '(sem nome)');
-  } catch {}
-
-  // segura 2s para garantir flush no log
-  await new Promise(r => setTimeout(r, 2000));
-  process.exit(0);
+client.on('auth_failure', (m) => {
+  console.error('Falha na autenticação:', m);
+  process.exit(1);
 });
 
 client.initialize();
