@@ -74,11 +74,23 @@ def parse_feedback(html: str):
 
     return False, 'Nenhum alerta de sucesso/erro encontrado'
 
+def prato_feedback(html: str):
+    soup = BeautifulSoup(requests.get(URL_HOME).content, 'html.parser')
+
+    # Almoço do dia / Opção 1
+    prato_do_dia_div = soup.select_one('p')
+    texto_prato_do_dia = erro_div.get_text(" ", strip=True)
+
+    return texto_prato_do_dia
+
 #  Execução principal 
 def main():
     hoje = datetime.now().isoweekday()  # 1=seg … 7=dom
     detalhes = []
     sess = requests.Session()
+
+    prato_do_dia = prato_feedback()
+    print(prato_do_dia)
 
     for aluno in load_alunos():
         if hoje not in aluno.get('dias', []):
