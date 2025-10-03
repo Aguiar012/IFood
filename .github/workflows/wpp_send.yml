@@ -1,57 +1,50 @@
-name: WhatsApp Send
-
+name: send
 on:
   workflow_dispatch:
-    inputs:
-      text:
-        description: "Mensagem (opcional)"
-        required: false
-        default: "Teste: funcionando"
-      to:
-        description: "Número destino (E164, ex: 55119...)"
-        required: false
+
+env:
+  SESSION_DIR: .wwebjs_auth
+  CLIENT_ID: almo-pt
+  WHATSAPP_TO: "5511972093213"   # ajuste aqui
+  MSG_FILE: /tmp/relatorio.txt
 
 jobs:
   send:
     runs-on: ubuntu-latest
-    env:
-      SESSION_DIR: .wwebjs_auth
-      CLIENT_ID: almo-pt   # MESMO id do login
-
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
 
-      - run: rm -f package-lock.json
-      - run: npm install
+      - name: Install deps
+        run: npm install
 
-      - name: Restore WhatsApp session (latest)
+      - name: Restore session cache
         uses: actions/cache/restore@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-${{ env.CLIENT_ID }}-always-miss   # força "miss"
+          key: wpp-session-${{ env.CLIENT_ID }}-${{ github.run_id }}
           restore-keys: |
-            wpp-session-${{ env.CLIENT_ID }}-                 # pega a MAIS RECENTE desse prefixo
-            
-      - name: "Checar se achou cache"
+            wpp-session-${{ env.CLIENT_ID }}-
+
+      - name: Assert restored session exists
         run: |
-          echo "cache-hit=${{ steps.restore.outputs.cache-hit }}"
+          if [ ! -d ".wwebjs_auth/session-${CLIENT_ID}" ]; then
+            echo "SEM SESSAO: rode o workflow 'login' primeiro para gerar e salvar a sessão."
+            exit 1
+          fi
+          ls -R .wwebjs_auth/session-${CLIENT_ID} | head -n 50
 
-      - name: "Diagnostico: listar sessao"
-        run: ls -R .wwebjs_auth || (echo "SEM SESSAO"; exit 1)
+      - name: Build message file
+        run: echo "Bot do Almoço - mensagem de teste" > "$MSG_FILE"
 
-      - name: Build msg
-        run: echo "${{ github.event.inputs.text }}" > /tmp/relatorio.txt
-
-      - name: Send message via WhatsApp Web
+      - name: Send
+        run: node send_whatsapp.cjs
         env:
-          MODE: send
+          MODO: send
           SESSION_DIR: ${{ env.SESSION_DIR }}
           CLIENT_ID: ${{ env.CLIENT_ID }}
-          MSG_FILE: /tmp/relatorio.txt
-          # Usa input 'to' se enviado; senao cai no secret
-          WHATSAPP_TO: ${{ github.event.inputs.to || secrets.WHATSAPP_TO }}
-        run: node send_whatsapp.cjs
+          WHATSAPP_TO: ${{ env.WHATSAPP_TO }}
+          MSG_FILE: ${{ env.MSG_FILE }}
