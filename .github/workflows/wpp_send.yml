@@ -1,33 +1,27 @@
 name: WhatsApp - Send
-
 on:
   workflow_dispatch:
     inputs:
       text:
-        description: "Mensagem (opcional)"
-        required: false
-        default: "Teste: funcionando"
-
+        description: "Mensagem"
+        required: true
 jobs:
   send:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Remover lock antigo
         run: rm -f package-lock.json
 
-      - name: Forçar versões corretas
-        run: npm i --no-save whatsapp-web.js@^1.26.0 puppeteer@^24.15.0 qrcode-terminal@^0.12.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-      - name: Versões instaladas
-        run: node -e "console.log('wwebjs', require('whatsapp-web.js/package.json').version); console.log('puppeteer', require('puppeteer/package.json').version)"
+      - name: Instalar deps
+        run: npm install
 
-      - name: Restaurar sessão do cache
+      - name: Restaurar sessão
         uses: actions/cache/restore@v4
         with:
           path: .wwebjs_auth
@@ -35,20 +29,13 @@ jobs:
           restore-keys: |
             wpp-session-
 
-      - name: Conferir sessão restaurada
-        run: |
-          if [ -d ".wwebjs_auth/session-almo-pt" ]; then
-            echo "Sessão OK:"
-            ls -R .wwebjs_auth/session-almo-pt | head -n 50
-          else
-            echo "Sessão NÃO encontrada. Rode o workflow de login."
-            exit 1
-          fi
+      - name: Conferir sessão
+        run: ls -R .wwebjs_auth || (echo "SEM SESSÃO"; exit 1)
 
       - name: Montar mensagem
         run: echo "${{ github.event.inputs.text }}" > /tmp/relatorio.txt
 
-      - name: Enviar mensagem
+      - name: Enviar
         env:
           MODE: send
           SESSION_DIR: .wwebjs_auth
