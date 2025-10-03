@@ -30,7 +30,14 @@ jobs:
         with:
           node-version: '20'
 
-      - run: npm ci
+      - name: Instalar dependências (usa ci se houver lockfile)
+        run: |
+          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
 
       # Restaura a sessão (tem que existir)
       - name: Restore session cache
