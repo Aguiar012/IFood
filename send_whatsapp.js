@@ -1,16 +1,10 @@
-// send_whatsapp.js
 const fs = require('fs');
-const path = require('path');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
-const TO = (process.env.WHATSAPP_TO || '').replace(/[^\d]/g, ''); // ex: +5511... -> 5511...
+const TO = (process.env.WHATSAPP_TO || '').replace(/[^\d]/g, '');
 const MSG_FILE = process.env.MSG_FILE || '/tmp/relatorio.txt';
 const SESSION_DIR = process.env.SESSION_DIR || '.wwebjs_auth';
-
-// ✅ O login criou a sessão em ".wwebjs_auth/session"
-//    Então vamos usar clientId 'session' e apontar o userDataDir exatamente para esse caminho.
-const CLIENT_ID = 'session';
-const USER_DATA_DIR = path.join(SESSION_DIR, 'session');
+const CLIENT_ID = 'session'; // precisa bater com o login
 
 if (!TO) {
   console.error('WHATSAPP_TO vazio.');
@@ -20,27 +14,27 @@ if (!TO) {
 const text = fs.existsSync(MSG_FILE) ? fs.readFileSync(MSG_FILE, 'utf8') : 'ping';
 
 console.log('USANDO SESSAO EM:', SESSION_DIR, 'clientId:', CLIENT_ID);
-console.log('PUPPETEER userDataDir:', USER_DATA_DIR);
 
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: SESSION_DIR, clientId: CLIENT_ID }),
+  authTimeoutMs: 120000,
   puppeteer: {
     headless: true,
-    userDataDir: USER_DATA_DIR,              // 👈 força usar o mesmo perfil (Default/ etc.)
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
+    args: ['--no-sandbox','--disable-setuid-sandbox']
   }
 });
 
 let readyOnce = false;
 
 client.on('qr', () => {
-  console.error('ATENCAO: QR solicitado no send -> nao achou perfil/sessao. Verifique userDataDir e cache.');
+  console.error('ATENCAO: QR solicitado no send -> a sessao nao foi encontrada/valida.');
   process.exit(1);
 });
 
 client.on('ready', async () => {
   if (readyOnce) return; readyOnce = true;
   console.log('CLIENT READY');
+
   const chatId = `${TO}@c.us`;
 
   const chunks = [];
