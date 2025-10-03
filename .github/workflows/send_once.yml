@@ -1,0 +1,47 @@
+name: Enviar mensagem simples no WhatsApp
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "Mensagem (opcional)"
+        required: false
+        default: "Teste: funcionando ✅"
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Node deps
+        run: npm install
+
+      - name: Restore WhatsApp session
+        uses: actions/cache/restore@v4
+        with:
+          path: .wwebjs_auth
+          key: wpp-session-cache
+          restore-keys: |
+            wpp-session-cache
+
+      - name: Build message file
+        run: |
+          echo "${{ github.event.inputs.text }}" > /tmp/relatorio.txt
+          cat /tmp/relatorio.txt
+
+      - name: Send message via WhatsApp Web
+        env:
+          WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}
+          MSG_FILE: /tmp/relatorio.txt
+          SESSION_DIR: .wwebjs_auth
+        run: |
+          if [ ! -d ".wwebjs_auth" ]; then
+            echo "Sessão não encontrada. Rode antes o workflow de login."
+            exit 1
+          fi
+          node send_whatsapp.js
