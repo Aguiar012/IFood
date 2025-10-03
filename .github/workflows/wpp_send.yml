@@ -1,17 +1,33 @@
-env:
-  SESSION_DIR: .wwebjs_auth
-  CLIENT_ID: almo-pt   # o MESMO do login
+name: WhatsApp Send
+
+on:
+  workflow_dispatch:
+    inputs:
+      text:
+        description: "Mensagem (opcional)"
+        required: false
+        default: "Teste: funcionando"
+      to:
+        description: "Número destino (E164, ex: 55119...)"
+        required: false
 
 jobs:
   send:
     runs-on: ubuntu-latest
+    env:
+      SESSION_DIR: .wwebjs_auth
+      CLIENT_ID: almo-pt   # MESMO id do login
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
-        with: { node-version: '20' }
+        with:
+          node-version: "20"
+
+      - run: rm -f package-lock.json
       - run: npm install
 
-      # ✅ restaurar pelo prefixo para pegar o cache MAIS RECENTE
       - name: Restore WhatsApp session (latest)
         uses: actions/cache/restore@v4
         with:
@@ -20,12 +36,18 @@ jobs:
           restore-keys: |
             wpp-session-${{ env.CLIENT_ID }}-
 
-      - run: ls -R .wwebjs_auth || (echo "SEM SESSAO"; exit 1)
+      - name: Diagnostico: listar sessao
+        run: ls -R .wwebjs_auth || (echo "SEM SESSAO"; exit 1)
 
-      - name: Enviar mensagem
-        run: node send_whatsapp.cjs
+      - name: Build msg
+        run: echo "${{ github.event.inputs.text }}" > /tmp/relatorio.txt
+
+      - name: Send message via WhatsApp Web
         env:
           MODE: send
           SESSION_DIR: ${{ env.SESSION_DIR }}
           CLIENT_ID: ${{ env.CLIENT_ID }}
-          WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}   # só o número, sem @c.us
+          MSG_FILE: /tmp/relatorio.txt
+          # Usa input 'to' se enviado; senao cai no secret
+          WHATSAPP_TO: ${{ github.event.inputs.to || secrets.WHATSAPP_TO }}
+        run: node send_whatsapp.cjs
