@@ -21,13 +21,15 @@ jobs:
       - name: Install Node deps
         run: npm install
 
-      - name: Restore WhatsApp session
+      - name: Restore WhatsApp session (latest)
         uses: actions/cache/restore@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-cache
+          # 'key' pode ser qualquer coisa; o que importa é o restore-keys abaixo
+          key: wpp-session-dummy
           restore-keys: |
-            wpp-session-cache
+            wpp-session-
+
 
       - name: Diagnóstico: listar sessão restaurada
         run: |
