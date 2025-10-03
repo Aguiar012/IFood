@@ -36,8 +36,8 @@ jobs:
       - name: Conferir conteúdo da sessão
         run: ls -R .wwebjs_auth
 
-      - name: Save session cache
+      - name: Save session cache (unique key)
         uses: actions/cache/save@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-cache
+          key: wpp-session-${{ github.run_id }}
