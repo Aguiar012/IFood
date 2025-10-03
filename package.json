@@ -1,15 +1,15 @@
 {
-  "name": "almo-pt",
+  "name": "wa-actions-bot",
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "login": "node login_whatsapp.cjs",
     "send": "node send_whatsapp.cjs"
   },
   "dependencies": {
-    "whatsapp-web.js": "1.34.1",
-    "puppeteer": "24.15.0",
-    "qrcode-terminal": "0.12.0"
+    "whatsapp-web.js": "^1.34.1",
+    "puppeteer": "^23.7.0",
+    "qrcode-terminal": "^0.12.0",
+    "qrcode": "^1.5.3"
   }
 }
