@@ -74,7 +74,7 @@ def parse_feedback(html: str):
 
     return False, 'Nenhum alerta de sucesso/erro encontrado'
 
-def prato_feedback(html: str):
+def prato_feedback():
     soup = BeautifulSoup(requests.get(URL_HOME).content, 'html.parser')
 
     # Almoço do dia / Opção 1
