@@ -79,7 +79,7 @@ def prato_feedback():
 
     # Almoço do dia / Opção 1
     prato_do_dia_div = soup.select_one('p')
-    texto_prato_do_dia = erro_div.get_text(" ", strip=True)
+    texto_prato_do_dia = prato_do_dia_div.get_text(" ", strip=True)
 
     return texto_prato_do_dia
 
