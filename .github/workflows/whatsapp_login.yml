@@ -1,4 +1,4 @@
-name: WhatsApp Login (RemoteAuth)
+name: WhatsApp - Login
 
 on:
   workflow_dispatch: {}
@@ -8,29 +8,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install deps
-        run: npm install
+      - run: npm install
 
-      - name: Restore RemoteAuth store
-        uses: actions/cache/restore@v4
-        with:
-          path: .wwebjs_auth
-          key: wpp-remote-${{ secrets.WHATSAPP_TO }}
-
-      - name: Login (scan QR no log)
+      - name: Rodar login (gera/atualiza sessão)
         env:
           MODE: login
           SESSION_DIR: .wwebjs_auth
           CLIENT_ID: almo-pt
         run: node send_whatsapp.cjs
 
-      - name: Save RemoteAuth store
+      - name: Ver sessão
+        run: |
+          echo "Estrutura:"
+          ls -R .wwebjs_auth || true
+
+      - name: Salvar cache da sessão
         uses: actions/cache/save@v4
         with:
           path: .wwebjs_auth
-          key: wpp-remote-${{ secrets.WHATSAPP_TO }}
+          key: wpp-session-${{ env.CLIENT_ID || 'almo-pt' }}
