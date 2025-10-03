@@ -36,7 +36,7 @@ jobs:
           restore-keys: |
             wpp-session-${{ env.CLIENT_ID }}-
 
-      - name: Diagnostico: listar sessao
+      - name: "Diagnostico: listar sessao"
         run: ls -R .wwebjs_auth || (echo "SEM SESSAO"; exit 1)
 
       - name: Build msg
