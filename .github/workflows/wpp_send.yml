@@ -1,56 +1,41 @@
 name: send
-
 on:
   workflow_dispatch:
-    inputs:
-      clientId:
-        description: "ID da sessão usada no login (ex.: almo-pt ou almo-pt2)"
-        required: true
-        default: "almo-pt"
-      to:
-        description: "Destino em E.164 (ex.: 5511972093213)"
-        required: true
-      text:
-        description: "Mensagem"
-        required: true
-        default: "Bot do Almoço - Mensagem automática."
+env:
+  SESSION_DIR: .wwebjs_auth
+  CLIENT_ID: almo-pt2            # deve ser o MESMO do login
+  WHATSAPP_TO: 5511932291930
+  WHATSAPP_TEXT: Bot do Almoço - Mensagem automática.
 
 jobs:
   send:
     runs-on: ubuntu-latest
-    env:
-      SESSION_DIR: .wwebjs_auth
-      CLIENT_ID: ${{ github.event.inputs.clientId }}
-      WHATSAPP_TO: ${{ github.event.inputs.to }}
-      WHATSAPP_TEXT: ${{ github.event.inputs.text }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - run: npm install
 
-      - name: Instalar dependências (usa ci se houver lockfile)
-        run: |
-          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-            npm ci --no-audit --no-fund
-          else
-            npm install --no-audit --no-fund
-          fi
-
-
-      # Restaura a sessão (tem que existir)
-      - name: Restore session cache
-        id: restore
+      - name: Restaurar sessão do cache
+        id: session
         uses: actions/cache/restore@v4
         with:
-          path: .wwebjs_auth/session-${{ env.CLIENT_ID }}
+          path: ${{ env.SESSION_DIR }}/session-${{ env.CLIENT_ID }}
+          # chave “completa” qualquer (provoca miss), necessária pelo action
+          key: wpp-session-${{ env.CLIENT_ID }}-${{ github.run_id }}
+          # tenta a MAIS RECENTE com esse prefixo:
           restore-keys: |
             wpp-session-${{ env.CLIENT_ID }}-
-      - name: Verificar sessão restaurada
-        run: |
-          ls -R .wwebjs_auth || (echo "SEM SESSAO"; exit 1)
-          test -d ".wwebjs_auth/session-${CLIENT_ID}" || (echo "SEM SESSAO PARA O CLIENT_ID=${CLIENT_ID}"; exit 2)
 
-      - name: Enviar mensagem
-        run: npm run send
+      - name: Checagem de cache
+        run: echo "cache-hit=${{ steps.session.outputs['cache-hit'] }}  primary=${{ steps.session.outputs['cache-primary-key'] }}"
+
+      - name: Falhar cedo se não houver sessão
+        if: steps.session.outputs['cache-hit'] == ''
+        run: |
+          echo "SEM SESSAO: rode o workflow 'login' para gerar/salvar a sessão no cache."
+          exit 1
+
+      - name: Enviar WhatsApp
+        run: node send_whatsapp.cjs
+        env:
+          MODE: send
