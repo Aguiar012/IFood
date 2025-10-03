@@ -6,38 +6,44 @@ on:
 jobs:
   login:
     runs-on: ubuntu-latest
-    env:
-      SESSION_DIR: .wwebjs_auth
-      CLIENT_ID: almo-pt
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+
+      # Garante Node
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
+      # Não confie no lock antigo
       - name: Remover lock antigo
         run: rm -f package-lock.json
 
-      - name: Instalar deps
-        run: npm install
+      # Instala libs na versão certa (sem depender do package.json do repo)
+      - name: Forçar versões corretas
+        run: npm i --no-save whatsapp-web.js@^1.26.0 puppeteer@^24.15.0 qrcode-terminal@^0.12.0
 
-      - name: Limpar cache antigo do wwebjs (se existir)
-        run: rm -rf .wwebjs_cache || true
+      - name: Versões instaladas
+        run: node -e "console.log('wwebjs', require('whatsapp-web.js/package.json').version); console.log('puppeteer', require('puppeteer/package.json').version)"
 
-      - name: Rodar login (gera/atualiza sessão)
+      # Começar do zero para não herdar sessão quebrada
+      - name: Limpar sessão antiga (opcional mas recomendado)
+        run: rm -rf .wwebjs_auth || true
+
+      - name: Rodar login (vai imprimir QR em ASCII)
         env:
           MODE: login
           SESSION_DIR: .wwebjs_auth
           CLIENT_ID: almo-pt
         run: node send_whatsapp.cjs
 
-      - name: Ver sessão
+      - name: Listar sessão gerada
         run: |
-          echo "Estrutura:"
+          echo "Conteúdo da sessão:"
           ls -R .wwebjs_auth || true
 
-      - name: Salvar cache da sessão
+      - name: Salvar sessão no cache
         uses: actions/cache/save@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-${{ env.CLIENT_ID }}
+          key: wpp-session-almo-pt
