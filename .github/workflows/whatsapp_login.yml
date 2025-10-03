@@ -1,51 +1,29 @@
 name: login
-
 on:
   workflow_dispatch:
-    inputs:
-      clientId:
-        description: "ID da sessão (ex.: almo-pt ou almo-pt2)"
-        required: true
-        default: "almo-pt"
+env:
+  SESSION_DIR: .wwebjs_auth
+  CLIENT_ID: almo-pt2         # mude aqui quando trocar de “cliente/linha”
 
 jobs:
   login:
     runs-on: ubuntu-latest
-    env:
-      SESSION_DIR: .wwebjs_auth
-      CLIENT_ID: ${{ github.event.inputs.clientId }}
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - run: npm install
 
-      - name: Instalar dependências (usa ci se houver lockfile)
-        run: |
-          if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
-            npm ci --no-audit --no-fund
-          else
-            npm install --no-audit --no-fund
-          fi
+      - name: Criar diretório da sessão (garantia)
+        run: mkdir -p "${{ env.SESSION_DIR }}/session-${{ env.CLIENT_ID }}"
 
+      - name: Rodar login (gera/atualiza a sessão)
+        run: node send_whatsapp.cjs
+        env:
+          MODE: login
 
-      # Restaura o cache mais recente dessa sessão (se existir)
-      - name: Restore session cache
-        id: restore
-        uses: actions/cache/restore@v4
-        with:
-          path: .wwebjs_auth/session-${{ env.CLIENT_ID }}
-          key: wpp-session-${{ env.CLIENT_ID }}-${{ github.run_id }}
-          restore-keys: |
-            wpp-session-${{ env.CLIENT_ID }}-
-
-      - name: Login (gera QR no log)
-        run: npm run login
-
-      # Salva/atualiza a sessão após o login bem-sucedido
-      - name: Save session cache
+      - name: Salvar sessão no cache
         uses: actions/cache/save@v4
         with:
-          path: .wwebjs_auth/session-${{ env.CLIENT_ID }}
+          path: ${{ env.SESSION_DIR }}/session-${{ env.CLIENT_ID }}
+          # chave única por execução; o prefixo "wpp-session-CLIENT_ID-" é o que importa
           key: wpp-session-${{ env.CLIENT_ID }}-${{ github.run_id }}
