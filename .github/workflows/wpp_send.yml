@@ -1,12 +1,24 @@
 name: send
+
 on:
   workflow_dispatch:
+    inputs:
+      client_id:
+        description: "CLIENT_ID da sessão"
+        default: "almo-pt"
+        required: true
+      to:
+        description: "Telefone no formato E164 (ex: 5511999998888)"
+        required: true
+      text:
+        description: "Texto da mensagem"
+        required: true
 
 env:
+  CLIENT_ID: ${{ inputs.client_id }}
   SESSION_DIR: .wwebjs_auth
-  CLIENT_ID: almo-pt
-  WHATSAPP_TO: "5511972093213"   # ajuste aqui
-  MSG_FILE: /tmp/relatorio.txt
+  WHATSAPP_TO: ${{ inputs.to }}
+  WHATSAPP_TEXT: ${{ inputs.text }}
 
 jobs:
   send:
@@ -18,33 +30,23 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install deps
-        run: npm install
+      - run: npm install
 
-      - name: Restore session cache
+      - name: Restaurar cache da sessão
+        id: cache-restore
         uses: actions/cache/restore@v4
         with:
           path: .wwebjs_auth
+          # chave exata se existir:
           key: wpp-session-${{ env.CLIENT_ID }}-${{ github.run_id }}
+          # e estes PREFIXOS como fallback (sem comentários, sem espaços extras!)
           restore-keys: |
             wpp-session-${{ env.CLIENT_ID }}-
 
-      - name: Assert restored session exists
-        run: |
-          if [ ! -d ".wwebjs_auth/session-${CLIENT_ID}" ]; then
-            echo "SEM SESSAO: rode o workflow 'login' primeiro para gerar e salvar a sessão."
-            exit 1
-          fi
-          ls -R .wwebjs_auth/session-${CLIENT_ID} | head -n 50
+      - name: Verificar sessão
+        run: ls -R .wwebjs_auth || (echo "SEM SESSAO"; exit 1)
 
-      - name: Build message file
-        run: echo "Bot do Almoço - mensagem de teste" > "$MSG_FILE"
-
-      - name: Send
+      - name: Enviar mensagem
         run: node send_whatsapp.cjs
         env:
           MODO: send
-          SESSION_DIR: ${{ env.SESSION_DIR }}
-          CLIENT_ID: ${{ env.CLIENT_ID }}
-          WHATSAPP_TO: ${{ env.WHATSAPP_TO }}
-          MSG_FILE: ${{ env.MSG_FILE }}
