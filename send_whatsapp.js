@@ -5,7 +5,8 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const TO = (process.env.WHATSAPP_TO || '').replace(/[^\d]/g, ''); // e.g. +55119... -> 55119...
 const MSG_FILE = process.env.MSG_FILE || '/tmp/relatorio.txt';
 const SESSION_DIR = process.env.SESSION_DIR || '.wwebjs_auth';
-const CLIENT_ID = 'default'; // mantenha igual no login
+const CLIENT_ID = 'session';
+
 
 if (!TO) {
   console.error('WHATSAPP_TO vazio.');
