@@ -45,4 +45,4 @@ jobs:
           CLIENT_ID: almo-pt
           WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}
           MSG_FILE: /tmp/relatorio.txt
-        run: node send_whatsapp.js
+        run: node send_whatsapp.cjs
