@@ -27,7 +27,7 @@ jobs:
           MODE: login
           SESSION_DIR: .wwebjs_auth
           CLIENT_ID: almo-pt
-        run: node send_whatsapp.js
+        run: node send_whatsapp.cjs
 
       - name: Save RemoteAuth store
         uses: actions/cache/save@v4
