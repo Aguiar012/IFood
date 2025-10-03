@@ -6,7 +6,7 @@ on:
       text:
         description: "Mensagem (opcional)"
         required: false
-        default: "Teste: funcionando ✅"
+        default: "Teste: funcionando"
 
 jobs:
   send:
@@ -29,19 +29,22 @@ jobs:
           restore-keys: |
             wpp-session-cache
 
-      - name: Build message file
+      - name: Diagnóstico: listar sessão restaurada
         run: |
-          echo "${{ github.event.inputs.text }}" > /tmp/relatorio.txt
-          cat /tmp/relatorio.txt
+          if [ -d ".wwebjs_auth" ]; then
+            echo "Sessão encontrada:"
+            ls -R .wwebjs_auth
+          else
+            echo "Sessão NÃO encontrada. Rode o workflow de login."
+            exit 1
+          fi
+
+      - name: Build msg
+        run: echo "${{ github.event.inputs.text }}" > /tmp/relatorio.txt
 
       - name: Send message via WhatsApp Web
         env:
           WHATSAPP_TO: ${{ secrets.WHATSAPP_TO }}
           MSG_FILE: /tmp/relatorio.txt
           SESSION_DIR: .wwebjs_auth
-        run: |
-          if [ ! -d ".wwebjs_auth" ]; then
-            echo "Sessão não encontrada. Rode antes o workflow de login."
-            exit 1
-          fi
-          node send_whatsapp.js
+        run: node send_whatsapp.js
