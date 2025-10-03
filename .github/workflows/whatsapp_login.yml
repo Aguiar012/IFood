@@ -1,4 +1,4 @@
-name: WhatsApp Login (gera sessão)
+name: WhatsApp Login (RemoteAuth)
 
 on:
   workflow_dispatch: {}
@@ -11,34 +11,26 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install deps
         run: npm install
 
-      - name: Render QR em ASCII e aguardar login
+      - name: Restore RemoteAuth store
+        uses: actions/cache/restore@v4
+        with:
+          path: .wwebjs_auth
+          key: wpp-remote-${{ secrets.WHATSAPP_TO }}
+
+      - name: Login (scan QR no log)
         env:
+          MODE: login
           SESSION_DIR: .wwebjs_auth
-        run: |
-          node -e "
-            const {Client, LocalAuth}=require('whatsapp-web.js');
-            const qrt=require('qrcode-terminal');
-            const c=new Client({
-              authStrategy:new LocalAuth({dataPath:process.env.SESSION_DIR, clientId:'session'}),
-              puppeteer:{headless:true,args:['--no-sandbox','--disable-setuid-sandbox']}
-            });
-            c.on('qr',qr=>{console.log('ESCANEIE O QR ABAIXO:'); qrt.generate(qr,{small:true});});
-            c.on('ready',()=>{console.log('LOGIN OK'); process.exit(0)});
-            c.initialize();
-            setTimeout(()=>{console.log('TIMEOUT'); process.exit(1)},120000);
-          "
+          CLIENT_ID: almo-pt
+        run: node send_whatsapp.js
 
-
-      - name: Conferir conteúdo da sessão
-        run: ls -R .wwebjs_auth
-
-      - name: Save session cache (unique key)
+      - name: Save RemoteAuth store
         uses: actions/cache/save@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-${{ github.run_id }}
+          key: wpp-remote-${{ secrets.WHATSAPP_TO }}
