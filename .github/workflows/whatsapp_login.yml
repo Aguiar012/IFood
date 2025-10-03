@@ -6,13 +6,20 @@ on:
 jobs:
   login:
     runs-on: ubuntu-latest
+    env:
+      SESSION_DIR: .wwebjs_auth
+      CLIENT_ID: almo-pt
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - run: npm install
+      - name: Instalar deps
+        run: npm install
+
+      - name: Limpar cache antigo do wwebjs (se existir)
+        run: rm -rf .wwebjs_cache || true
 
       - name: Rodar login (gera/atualiza sessão)
         env:
@@ -30,4 +37,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-${{ env.CLIENT_ID || 'almo-pt' }}
+          key: wpp-session-${{ env.CLIENT_ID }}
