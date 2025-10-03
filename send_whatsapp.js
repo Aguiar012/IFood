@@ -1,49 +1,71 @@
+// send_whatsapp.js
 const fs = require('fs');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 
+const TO = (process.env.WHATSAPP_TO || '').replace(/[^\d]/g, ''); // e.g. +55119... -> 55119...
 const MSG_FILE = process.env.MSG_FILE || '/tmp/relatorio.txt';
-const TO_NUMBER = (process.env.WHATSAPP_TO || '').replace(/[^\d]/g, '');
-if (!TO_NUMBER) {
-  console.error('Faltou WHATSAPP_TO (ex: +5511932291930)');
-  process.exit(1);
-}
-const message = fs.readFileSync(MSG_FILE, 'utf8').trim();
-if (!message) {
-  console.error(`Arquivo de mensagem vazio: ${MSG_FILE}`);
+const SESSION_DIR = process.env.SESSION_DIR || '.wwebjs_auth';
+const CLIENT_ID = 'default'; // mantenha igual no login
+
+if (!TO) {
+  console.error('WHATSAPP_TO vazio.');
   process.exit(1);
 }
 
-const SESSION_DIR = process.env.SESSION_DIR || '.wwebjs_auth';
+const text = fs.existsSync(MSG_FILE) ? fs.readFileSync(MSG_FILE, 'utf8') : 'ping';
+
+console.log('USANDO SESSAO EM:', SESSION_DIR, 'clientId:', CLIENT_ID);
+
 const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: SESSION_DIR }),
+  authStrategy: new LocalAuth({ dataPath: SESSION_DIR, clientId: CLIENT_ID }),
   puppeteer: {
     headless: true,
-    args: [
-      '--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage',
-      '--disable-gpu','--no-zygote','--single-process'
-    ]
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   }
 });
 
-(async () => {
-  client.on('qr', (qr) => {
-    console.log('QR_CODE:', qr.slice(0, 50) + '...');
-  });
-  client.on('authenticated', () => console.log('AUTH: ok'));
-  client.on('auth_failure', msg => { console.error('AUTH FAILURE:', msg); process.exit(2); });
-  client.on('ready', async () => {
-    console.log('CLIENT READY');
-    const chatId = `${TO_NUMBER}@c.us`;
-    const chunks = [];
-    const N = 3500;
-    for (let i = 0; i < message.length; i += N) chunks.push(message.slice(i, i+N));
-    for (let i = 0; i < chunks.length; i++) {
-      await client.sendMessage(chatId, chunks[i]);
-      console.log(`ENVIADO ${i+1}/${chunks.length}`);
-      await new Promise(r => setTimeout(r, 600));
-    }
-    console.log('OK: envio concluído');
-    process.exit(0);
-  });
-  await client.initialize();
-})();
+let readyOnce = false;
+
+client.on('qr', () => {
+  // Se cair aqui é porque a sessão NÃO foi carregada.
+  console.error('ATENCAO: QR solicitado no send -> a sessao nao foi restaurada ou clientId/dataPath nao batem.');
+  process.exit(1);
+});
+
+client.on('ready', async () => {
+  if (readyOnce) return;
+  readyOnce = true;
+  console.log('CLIENT READY');
+
+  const chatId = `${TO}@c.us`;
+
+  // quebra mensagem grande em blocos de até 3500 chars (limite seguro)
+  const chunks = [];
+  const max = 3500;
+  for (let i = 0; i < text.length; i += max) chunks.push(text.slice(i, i + max));
+
+  let sent = 0;
+  for (const part of chunks) {
+    await client.sendMessage(chatId, part);
+    sent += 1;
+  }
+  console.log(`ENVIADO ${sent}/${chunks.length}`);
+  process.exit(0);
+});
+
+client.on('auth_failure', (m) => {
+  console.error('AUTH FAILURE:', m);
+  process.exit(1);
+});
+
+client.on('disconnected', (r) => {
+  console.error('DISCONNECTED:', r);
+  process.exit(1);
+});
+
+client.initialize();
+
+// kill guard
+setTimeout(() => {
+  console.error('TIMEOUT no send (120s)'); process.exit(1);
+}, 120000);
