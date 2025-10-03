@@ -32,9 +32,13 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-${{ env.CLIENT_ID }}-dummy
+          key: wpp-session-${{ env.CLIENT_ID }}-always-miss   # força "miss"
           restore-keys: |
-            wpp-session-${{ env.CLIENT_ID }}-
+            wpp-session-${{ env.CLIENT_ID }}-                 # pega a MAIS RECENTE desse prefixo
+            
+      - name: "Checar se achou cache"
+        run: |
+          echo "cache-hit=${{ steps.restore.outputs.cache-hit }}"
 
       - name: "Diagnostico: listar sessao"
         run: ls -R .wwebjs_auth || (echo "SEM SESSAO"; exit 1)
