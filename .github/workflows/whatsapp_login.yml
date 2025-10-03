@@ -1,42 +1,37 @@
-name: WhatsApp - Login
-on: workflow_dispatch
+env:
+  SESSION_DIR: .wwebjs_auth
+  CLIENT_ID: almo-pt   # use o MESMO nos dois workflows
+
 jobs:
   login:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-
-      - name: Remover lock antigo
-        run: rm -f package-lock.json
-
       - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+
+      # (Opcional) tenta restaurar uma sessão anterior, se existir
+      - name: Restore previous session (optional)
+        uses: actions/cache/restore@v4
         with:
-          node-version: "20"
+          path: .wwebjs_auth
+          key: wpp-session-${{ env.CLIENT_ID }}-dummy
+          restore-keys: |
+            wpp-session-${{ env.CLIENT_ID }}-
 
-      - name: Instalar deps
-        run: npm install
+      - run: npm install
 
-      - name: Checar versões
-        run: |
-          node -v
-          npm ls whatsapp-web.js puppeteer
-
-      - name: Limpar cache wwebjs antigo
-        run: rm -rf .wwebjs_cache || true
-
-      - name: Rodar login (QR no log)
+      # seu passo de login que mostra o QR e espera READY OK
+      - name: Login no WhatsApp (gera e espera QR)
+        run: node send_whatsapp.cjs
         env:
           MODE: login
-          SESSION_DIR: .wwebjs_auth
-          CLIENT_ID: almo-pt
-        run: node send_whatsapp.cjs
+          SESSION_DIR: ${{ env.SESSION_DIR }}
+          CLIENT_ID: ${{ env.CLIENT_ID }}
 
-      - name: Mostrar sessão
-        run: ls -R .wwebjs_auth || true
-
-      - name: Salvar sessão
+      # ⚠️ SALVAR com chave única (não congela um cache velho)
+      - name: Save session (unique key)
         uses: actions/cache/save@v4
         with:
           path: .wwebjs_auth
-          key: wpp-session-almo-pt
+          key: wpp-session-${{ env.CLIENT_ID }}-${{ github.run_id }}
