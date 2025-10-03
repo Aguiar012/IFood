@@ -1,4 +1,4 @@
-name: Enviar mensagem simples no WhatsApp
+name: WPP Send (simple)
 
 on:
   workflow_dispatch:
@@ -29,13 +29,13 @@ jobs:
           restore-keys: |
             wpp-session-
 
-      - name: Diagnóstico: listar sessão restaurada
+      - name: "Diagnostico - listar sessao restaurada"
         run: |
           if [ -d ".wwebjs_auth" ]; then
-            echo "Sessão encontrada:"
+            echo "Sessao encontrada:"
             ls -R .wwebjs_auth
           else
-            echo "Sessão NÃO encontrada. Rode o workflow de login."
+            echo "Sessao NAO encontrada. Rode o workflow de login."
             exit 1
           fi
 
