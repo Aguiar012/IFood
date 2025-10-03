@@ -29,6 +29,15 @@ jobs:
           restore-keys: |
             wpp-session-
 
+      - name: Normalizar nome da sessão
+        run: |
+          if [ -d ".wwebjs_auth/session-session" ] && [ ! -d ".wwebjs_auth/session" ]; then
+            echo "Renomeando .wwebjs_auth/session-session -> .wwebjs_auth/session"
+            mv .wwebjs_auth/session-session .wwebjs_auth/session
+          fi
+          echo "Estrutura atual:"
+          find .wwebjs_auth -maxdepth 2 -type d | sort
+
       - name: "Diagnostico - listar sessao restaurada"
         run: |
           if [ -d ".wwebjs_auth" ]; then
