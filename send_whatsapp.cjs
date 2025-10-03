@@ -1,11 +1,12 @@
 // send_whatsapp.cjs
 const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 
 const MODE = process.env.MODE || 'send';                  // 'login' ou 'send'
 const SESSION_DIR = process.env.SESSION_DIR || '.wwebjs_auth';
-const CLIENT_ID = process.env.CLIENT_ID || 'almo-pt';     // IGUAL no login e no send
-const WHATSAPP_TO = process.env.WHATSAPP_TO;              // ex: 5511932291930
+const CLIENT_ID = process.env.CLIENT_ID || 'almo-pt';
+const WHATSAPP_TO = process.env.WHATSAPP_TO;
 const MSG_FILE = process.env.MSG_FILE || '/tmp/relatorio.txt';
 
 console.log(`MODO: ${MODE}`);
@@ -15,16 +16,20 @@ console.log(`CLIENT_ID: ${CLIENT_ID}`);
 const client = new Client({
   authStrategy: new LocalAuth({ dataPath: SESSION_DIR, clientId: CLIENT_ID }),
   puppeteer: { headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] },
-
-  // Evita o bug do LocalWebCache pegando a versão suportada remotamente
   webVersionCache: {
     type: 'remote',
     remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/last.json'
   }
 });
 
-client.on('qr', () => {
-  console.log('QR SOLICITADO.');
+client.on('qr', (qr) => {
+  console.log('QR GERADO: ESCANEIE ABAIXO');
+  try {
+    qrcode.generate(qr, { small: true });   // <<< AQUI imprime o QR em ASCII
+  } catch (e) {
+    console.log('Falha ao renderizar QR em ASCII. Conteúdo do QR string:');
+    console.log(qr);
+  }
   if (MODE === 'send') {
     console.error('ERRO: QR no modo send -> sessão NÃO restaurada/compatível.');
     process.exit(1);
