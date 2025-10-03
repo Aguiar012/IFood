@@ -24,12 +24,7 @@ const client = new Client({
 
 client.on('qr', (qr) => {
   console.log('QR GERADO: ESCANEIE ABAIXO');
-  try {
-    qrcode.generate(qr, { small: true });   // <<< AQUI imprime o QR em ASCII
-  } catch (e) {
-    console.log('Falha ao renderizar QR em ASCII. Conteúdo do QR string:');
-    console.log(qr);
-  }
+  qrcode.generate(qr, { small: true });
   if (MODE === 'send') {
     console.error('ERRO: QR no modo send -> sessão NÃO restaurada/compatível.');
     process.exit(1);
@@ -40,6 +35,7 @@ client.on('ready', async () => {
   console.log('READY OK');
 
   if (MODE === 'login') {
+    // No login só queremos criar/vincular a sessão e sair
     process.exit(0);
   }
 
