@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       message:
-        description: "Mensagem para o admin (será enviada pelo WhatsApp Cloud API dev)"
+        description: "Mensagem para o admin"
         required: true
         default: "Alerta: verifique o robô de pedidos."
 
@@ -12,14 +12,35 @@ jobs:
   send:
     runs-on: ubuntu-latest
     steps:
-      - name: Send WhatsApp message (Cloud API dev)
+      - name: Open session with template (hello_world)
+        env:
+          WA_TOKEN: ${{ secrets.WA_TOKEN }}
+          WA_PHONE_NUMBER_ID: ${{ secrets.WA_PHONE_NUMBER_ID }}
+          ADMIN_E164: ${{ secrets.ADMIN_E164 }}
+        run: |
+          curl -sS -X POST "https://graph.facebook.com/v22.0/${WA_PHONE_NUMBER_ID}/messages" \
+            -H "Authorization: Bearer ${WA_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d @- <<JSON
+          {
+            "messaging_product": "whatsapp",
+            "to": "+${ADMIN_E164}",
+            "type": "template",
+            "template": { "name": "hello_world", "language": { "code": "en_US" } }
+          }
+          JSON
+
+      - name: Wait a moment
+        run: sleep 3
+
+      - name: Send text message
         env:
           WA_TOKEN: ${{ secrets.WA_TOKEN }}
           WA_PHONE_NUMBER_ID: ${{ secrets.WA_PHONE_NUMBER_ID }}
           ADMIN_E164: ${{ secrets.ADMIN_E164 }}
           MSG: ${{ github.event.inputs.message }}
         run: |
-          set -euo pipefail
+          # Se a sua mensagem tiver aspas, isso aqui pode quebrar; se precisar, migro para Node.
           curl -sS -X POST "https://graph.facebook.com/v22.0/${WA_PHONE_NUMBER_ID}/messages" \
             -H "Authorization: Bearer ${WA_TOKEN}" \
             -H "Content-Type: application/json" \
