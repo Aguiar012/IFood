@@ -9,7 +9,7 @@
       4,
       5
     ],
-    "pedido_para_amanha": false,
+    "pedido_para_amanha": true,
     "_comentario": "segunda=1 … domingo=7"
   }
 ]
