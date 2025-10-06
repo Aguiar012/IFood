@@ -147,11 +147,11 @@ async function sendMail({ prontuario, dateISO, fromPhone }) {
     auth: { user: SMTP_USER, pass: SMTP_PASS }
   });
 
-  const assunto = `Cancelamento de almoço — prontuário ${prontuario} — ${dateISO}`;
+  const assunto = `Cancelamento de almoço — prontuário ${prontuario} — ${br}`;
   const corpo =
 `Olá,
 
-Mensagem automática: o prontuário ${prontuario} solicita o cancelamento do pedido de almoço para ${dateISO}.
+Mensagem automática: o prontuário ${prontuario} solicita o cancelamento do pedido de almoço para ${br}.
 Solicitação enviada a partir do número ${fromPhone}.
 Horário (BRT): ${new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, dateStyle: 'full', timeStyle: 'medium' }).format(new Date())}.
 
