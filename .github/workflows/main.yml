@@ -41,17 +41,17 @@ jobs:
         env:
           TWILIO_ACCOUNT_SID:  ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:   ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_FROM:         ${{ secrets.TWILIO_FROM }} 
-          ADMINS_E164:         ${{ secrets.ADMINS_E164 }} 
+          TWILIO_FROM:         ${{ secrets.TWILIO_FROM }} # ex.: whatsapp:+14155238886
+          ADMINS_E164:         ${{ secrets.ADMINS_E164 }} # +5511932291930,+5511918796426
         run: |
-          AUTH=$(printf "%s:%s" "$TWILIO_ACCOUNT_SID" "$TWILIO_AUTH_TOKEN" | base64)
           IFS=',' read -ra ADMINS <<< "$ADMINS_E164"
           for A in "${ADMINS[@]}"; do
             A="${A//[[:space:]]/}"
             TO="whatsapp:${A}"
-            curl -sS -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json" \
-              -H "Authorization: Basic ${AUTH}" \
-              --data-urlencode "From=${TWILIO_FROM:-whatsapp:+14155238886}" \
+            MSG="Falha no GitHub Actions em ${GITHUB_REPOSITORY} | Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            curl -sS -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" \
+              -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json" \
+              --data-urlencode "From=${TWILIO_FROM}" \
               --data-urlencode "To=${TO}" \
-              --data-urlencode "Body=Falha no GitHub Actions em ${GITHUB_REPOSITORY}%0ARun: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              --data-urlencode "Body=${MSG}"
           done
