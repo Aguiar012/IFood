@@ -134,9 +134,9 @@ async function markCancelled(key) {
 }
 
 // ====== Envio de e-mail ======
-async function sendMail({ prontuario, dateISO, fromPhone }) {
+async function sendMail({ prontuario, dateISO, dateBR, fromPhone }) {
   if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
-    console.log('[EMAIL-SIMULADO]', { prontuario, dateISO, fromPhone, to: EMAIL_TO });
+    console.log('[EMAIL-SIMULADO]', { prontuario, dateISO, dateBR, fromPhone, to: EMAIL_TO });
     return { simulated: true };
   }
   const nodemailer = await import('nodemailer');
@@ -147,11 +147,11 @@ async function sendMail({ prontuario, dateISO, fromPhone }) {
     auth: { user: SMTP_USER, pass: SMTP_PASS }
   });
 
-  const assunto = `Cancelamento de almoço — prontuário ${prontuario} — ${br}`;
+  const assunto = `Cancelamento de almoço — prontuário ${prontuario} — ${dateBR}`;
   const corpo =
 `Olá,
 
-Mensagem automática: o prontuário ${prontuario} solicita o cancelamento do pedido de almoço para ${br}.
+Mensagem automática: o prontuário ${prontuario} solicita o cancelamento do pedido de almoço para ${dateBR}.
 Solicitação enviada a partir do número ${fromPhone}.
 Horário (BRT): ${new Intl.DateTimeFormat('pt-BR', { timeZone: TZ, dateStyle: 'full', timeStyle: 'medium' }).format(new Date())}.
 
@@ -174,7 +174,8 @@ async function replyDefault(from, reg) {
     return (
       `Parece que não temos o seu número vinculado a nenhum prontuário no sistema.\n` +
       `Cadastre-se: ${FORM_URL}\n` +
-      `Ativação em até 48h.`
+      `Ativação em até 48h.\n\n` +
+      `Se você acabou de entrar no sandbox, envie qualquer mensagem (ex.: "Oi") para iniciar.`
     );
   }
   const { br, iso } = computeCancelableDate();
@@ -213,7 +214,9 @@ export default async function handler(req, res) {
   const mapa = await loadMap();
   const reg  = mapa.get(from); // { prontuario, pedidoParaAmanha }
 
-  // 1) “join <code>” do Sandbox: já responde com a mensagem padrão do fluxo
+  // 1) “join <code>” do Sandbox: responde com a mensagem padrão do fluxo
+  //    OBS: o Twilio geralmente NÃO encaminha o "join" ao webhook;
+  //    este branch existe por segurança caso venha.
   if (/^join\s/i.test(body)) {
     const text = await replyDefault(from, reg);
     res.setHeader('Content-Type', 'text/xml');
@@ -238,7 +241,12 @@ export default async function handler(req, res) {
       return res.status(200).send(twiml(`Seu pedido já foi cancelado para ${br}.`));
     }
     try {
-      await sendMail({ prontuario: reg.prontuario, dateISO: iso, fromPhone: from.replace(/^whatsapp:/, '') });
+      await sendMail({
+        prontuario: reg.prontuario,
+        dateISO: iso,
+        dateBR: br,
+        fromPhone: from.replace(/^whatsapp:/, '')
+      });
       await markCancelled(key);
       res.setHeader('Content-Type', 'text/xml');
       return res.status(200).send(twiml(
@@ -257,4 +265,4 @@ export default async function handler(req, res) {
   const text = await replyDefault(from, reg);
   res.setHeader('Content-Type', 'text/xml');
   return res.status(200).send(twiml(text));
-}
+    }
