@@ -3,7 +3,7 @@ name: AlmoPT
 on:
   workflow_dispatch:
   schedule:
-    # 12:00 BRT = 15:00 UTC, seg–sex
+    # Se você quer rodar às 06:00 BRT (UTC-3) => 09:00 UTC:
     - cron: '0 9 * * 1-5'
 
 jobs:
@@ -27,4 +27,31 @@ jobs:
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT:   ${{ secrets.SMTP_PORT }}
           TO_ADDRESS:  ${{ secrets.TO_ADDRESS }}
+
+          # Se o seu auto_pedido.py também avisa admins via Twilio nos "erros relevantes",
+
+          TWILIO_ACCOUNT_SID:  ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:   ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM:         ${{ secrets.TWILIO_FROM }} 
+          ADMINS_E164:         ${{ secrets.ADMINS_E164 }}
         run: python auto_pedido.py
+
+      - name: Notify admins on failure (Twilio Sandbox)
+        if: failure()
+        env:
+          TWILIO_ACCOUNT_SID:  ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:   ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM:         ${{ secrets.TWILIO_FROM }} 
+          ADMINS_E164:         ${{ secrets.ADMINS_E164 }} 
+        run: |
+          AUTH=$(printf "%s:%s" "$TWILIO_ACCOUNT_SID" "$TWILIO_AUTH_TOKEN" | base64)
+          IFS=',' read -ra ADMINS <<< "$ADMINS_E164"
+          for A in "${ADMINS[@]}"; do
+            A="${A//[[:space:]]/}"
+            TO="whatsapp:${A}"
+            curl -sS -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json" \
+              -H "Authorization: Basic ${AUTH}" \
+              --data-urlencode "From=${TWILIO_FROM:-whatsapp:+14155238886}" \
+              --data-urlencode "To=${TO}" \
+              --data-urlencode "Body=Falha no GitHub Actions em ${GITHUB_REPOSITORY}%0ARun: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          done
