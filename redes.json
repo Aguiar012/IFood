@@ -12,4 +12,17 @@
     "pedido_para_amanha": true,
     "_comentario": "segunda=1 … domingo=7"
   }
+  {
+    "prontuario": "3029701",
+    "telefone": "5511961223791",
+    "dias": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "pedido_para_amanha": true,
+    "_comentario": "segunda=1 … domingo=7"
+  }
 ]
