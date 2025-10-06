@@ -3,6 +3,13 @@ from email.message import EmailMessage
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta 
 
+import base64  # novo
+
+TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
+TWILIO_AUTH_TOKEN  = os.getenv('TWILIO_AUTH_TOKEN')
+TWILIO_FROM        = os.getenv('TWILIO_FROM', 'whatsapp:+14155238886')
+ADMINS_E164        = [s.strip() for s in os.getenv('ADMINS_E164', '').split(',') if s.strip()]
+
 datetime.now() - timedelta(hours=3) # horário de brasilia
 
 #  Configurações gerais
@@ -31,6 +38,31 @@ def send_email(subject: str, body: str):
         smtp.starttls()
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
+
+def send_whatsapp_text_twilio(to_e164: str, body: str):
+    """
+    Envia texto via Twilio WhatsApp Sandbox.
+    Pré-requisitos:
+      - to_e164 no formato +5511..., e já 'join' no sandbox.
+      - TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN configurados.
+    """
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
+        logging.warning('TWILIO_* não configurados; alerta WhatsApp suprimido.')
+        return
+    to_full = to_e164 if to_e164.startswith('whatsapp:+') else f'whatsapp:{to_e164 if to_e164.startswith("+") else "+"+to_e164}'
+    url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
+    auth = base64.b64encode(f'{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}'.encode()).decode()
+    data = {
+        'From': TWILIO_FROM,
+        'To':   to_full,
+        'Body': body[:1600]  # margem defensiva
+    }
+    try:
+        r = requests.post(url, data=data, headers={'Authorization': f'Basic {auth}'}, timeout=15)
+        if not r.ok:
+            logging.error('Falha Twilio %s: %s', r.status_code, r.text)
+    except Exception as e:
+        logging.exception('Exceção no envio WhatsApp (Twilio): %s', e)
 
 #  Leitura do JSON 
 def load_alunos():
@@ -125,6 +157,9 @@ def main():
     for pront, ok, msg, ini, fim, tent in detalhes:
         status = 'OK ' if ok else 'FALHOU'
         linhas.append(f'{pront} | {status} | {ini}→{fim} | {tent} | {msg}')
+
+    for admin in ADMINS_E164:
+        send_whatsapp_text_twilio(admin, resumo)
 
     send_email('Relatório Auto-Almoço', '\n'.join(linhas))
 
