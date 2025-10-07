@@ -126,7 +126,6 @@ def main():
 
     for aluno in load_alunos():
         if hoje not in aluno.get('dias', []):
-            aluno('pediu_para_amanha') = false
             continue
 
         pront = aluno['prontuario']
