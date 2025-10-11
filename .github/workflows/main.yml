@@ -3,8 +3,10 @@ name: AlmoPT
 on:
   workflow_dispatch:
   schedule:
-    # Se você quer rodar às 06:00 BRT (UTC-3) => 09:00 UTC:
+    # 06:00 America/Sao_Paulo (UTC-3) => 09:00 UTC
     - cron: '0 9 * * 1-5'
+    # 14:00 America/Sao_Paulo (UTC-3) => 17:00 UTC
+    - cron: '0 17 * * 1-5'
 
 jobs:
   almoco:
@@ -27,8 +29,6 @@ jobs:
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT:   ${{ secrets.SMTP_PORT }}
           TO_ADDRESS:  ${{ secrets.TO_ADDRESS }}
-
-          # Se o seu auto_pedido.py também avisa admins via Twilio nos "erros relevantes",
 
           TWILIO_ACCOUNT_SID:  ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN:   ${{ secrets.TWILIO_AUTH_TOKEN }}
