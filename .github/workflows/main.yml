@@ -20,7 +20,7 @@ jobs:
           python-version: '3.x'
 
       - name: Install deps
-        run: pip install requests beautifulsoup4
+        run: pip install requests beautifulsoup4 psycopg[binary]
 
       - name: Run AlmoPT
         env:
@@ -34,6 +34,8 @@ jobs:
           TWILIO_AUTH_TOKEN:   ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_FROM:         ${{ secrets.TWILIO_FROM }} 
           ADMINS_E164:         ${{ secrets.ADMINS_E164 }}
+
+          DATABASE_URL:        ${{ secrets.DATABASE_URL }} 
         run: python auto_pedido.py
 
       - name: Notify admins on failure (Twilio Sandbox)
