@@ -2,6 +2,7 @@ import json, time, logging, random, os, smtplib, requests, re, base64
 from email.message import EmailMessage
 from bs4 import BeautifulSoup
 from datetime import datetime
+import psycopg
 
 # === Twilio Sandbox (WhatsApp) ===
 TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
@@ -22,6 +23,8 @@ EMAIL_PASS   = os.getenv('EMAIL_PASS')
 SMTP_SERVER  = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT    = int(os.getenv('SMTP_PORT', 587))
 TO_ADDRESS   = os.getenv('TO_ADDRESS')
+
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s',
                     level=logging.INFO)
@@ -60,8 +63,25 @@ def send_whatsapp_text_twilio(to_e164: str, body: str):
 
 # === Dados ===
 def load_alunos():
-    with open(ARQUIVO, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    if not DATABASE_URL:
+        raise RuntimeError("Faltou DATABASE_URL")
+    hoje = datetime.now().isoweekday()
+    out = []
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                select a.prontuario
+                from aluno a
+                join preferencia_dia p on p.aluno_id = a.id
+                where a.ativo = true and p.dia_semana = %s
+                order by a.prontuario
+            """, (hoje,))
+            for row in cur.fetchall():
+                (prontuario,) = row
+                out.append({'prontuario': prontuario})
+    return out
+
+
 
 # === HTTP / parsing do site ===
 def get_csrf_token(sess):
@@ -103,10 +123,14 @@ def prato_feedback():
         return '(indisponível)'
 
 # === Filtro de erros relevantes ===
+
 IGNORE_PATTERNS = [
-    r'Gerado anteriormente',  # duplicado
-    r'Ticket Gerado',         # sucesso
+    r'Gerado anteriormente',
+    r'Ticket Gerado',
+    r'PULOU_PREF',                     # <-- NOVO
+    r'Pulou por prefer.ncia',          # <-- NOVO (pegando sem acento)
 ]
+
 def is_relevant_error(msg: str) -> bool:
     if not msg:
         return False
@@ -114,10 +138,45 @@ def is_relevant_error(msg: str) -> bool:
         if re.search(pat, msg, re.IGNORECASE):
             return False
     return True
+  
+# === Verificar no databaset se aluno está ativo ===
+def _norm(txt: str) -> str:
+    if not txt:
+        return ""
+    t = unicodedata.normalize('NFKD', txt)
+    t = ''.join(ch for ch in t if not unicodedata.combining(ch))
+    return t.lower()
+
+def should_skip(prato_texto: str, bloqueios: list[str]) -> tuple[bool, str]:
+    base = _norm(prato_texto)
+    hits = []
+    for b in bloqueios:
+        b2 = _norm(b)
+        if b2 and b2 in base:
+            hits.append(b)
+    return (len(hits) > 0, ", ".join(hits))
+
+# === Verificar no databaset se aluno não gosta de pedir algum prato ===
+
+def get_bloqueios_por_prontuario(pront: str) -> list[str]:
+    if not DATABASE_URL:
+        return []
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                select pb.nome
+                from prato_bloqueado pb
+                join aluno a on a.id = pb.aluno_id
+                where a.prontuario = %s
+                order by pb.nome
+            """, (pront,))
+            return [r[0] for r in cur.fetchall()]
+
+
 
 # === Execução principal ===
 def main():
-    hoje = datetime.now().isoweekday()  # 1=seg … 7=dom
+    hoje = datetime.now().isoweekday()
     detalhes = []
     sess = requests.Session()
 
@@ -125,11 +184,19 @@ def main():
     logging.info("Prato do dia: %s", prato_do_dia)
 
     for aluno in load_alunos():
-        if hoje not in aluno.get('dias', []):
+        pront = aluno['prontuario']
+        # Checagem de bloqueios
+        bloqueios = get_bloqueios_por_prontuario(pront)
+        skip, hits = should_skip(prato_do_dia, bloqueios)
+        if skip:
+            # conta como OK (evita alerta) e registra o motivo
+            inicio = datetime.now().strftime('%H:%M:%S')
+            time.sleep(random.randint(0, JITTER_MAX))
+            fim = datetime.now().strftime('%H:%M:%S')
+            detalhes.append((pront, True, f'PULOU_PREF: {hits}', inicio, fim, 0))
             continue
 
-        pront = aluno['prontuario']
-        time.sleep(random.randint(0, JITTER_MAX))  # jitter
+        time.sleep(random.randint(0, JITTER_MAX))
         inicio = datetime.now().strftime('%H:%M:%S')
 
         sucesso, mensagem = False, ''
@@ -147,6 +214,7 @@ def main():
 
         fim = datetime.now().strftime('%H:%M:%S')
         detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
+
 
     # Email de relatório (como antes)
     linhas = ['Relatório Auto-Almoço — ' + datetime.now().strftime('%d/%m/%Y')]
