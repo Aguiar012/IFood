@@ -1,4 +1,4 @@
-import json, time, logging, random, os, smtplib, requests, re, base64
+import json, time, logging, random, os, smtplib, requests, re, base64, unicodedata
 from email.message import EmailMessage
 from bs4 import BeautifulSoup
 from datetime import datetime
