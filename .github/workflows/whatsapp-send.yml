@@ -10,11 +10,12 @@ on:
 
 jobs:
   send:
+    # Dica: prefira self-hosted runner para evitar 405; mas com proxy residencial costuma conectar.
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
-      # Restaura a sessão do Baileys se existir (cache mais recente)
       - name: Restore Baileys auth cache
         id: auth-restore
         uses: actions/cache/restore@v4
@@ -30,17 +31,17 @@ jobs:
           node-version: '20'
 
       - name: Install deps
-        run: npm ci || npm i
+        run: npm i --no-audit --no-fund
 
       - name: Enviar WhatsApp
         env:
-          # seu número (E.164 sem +): 55 11 932291930
           WA_TO: "5511932291930"
           WA_TEXT: "${{ github.event.inputs.text }}"
           WA_AUTH_DIR: "wa_auth"
+          # DataImpulse: país Brasil via __cr.br (country targeting); sticky port 10000
+          WA_PROXY_URL: "http://${{ secrets.DI_LOGIN }}__cr.br:${{ secrets.DI_PASSWORD }}@gw.dataimpulse.com:10000"
         run: npm run send
 
-      # Salva/atualiza o cache da sessão para futuros runs (usa uma nova chave a cada run)
       - name: Save Baileys auth cache
         if: always()
         uses: actions/cache/save@v4
