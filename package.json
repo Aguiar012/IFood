@@ -1,8 +1,14 @@
 {
-  "name": "almo-whatsapp-bot",
+  "name": "wa-actions-bot",
+  "private": true,
   "version": "1.0.0",
-  "type": "module",
-    "dependencies": {
-    "nodemailer": "^6.9.9"
+  "main": "wa-send.js",
+  "license": "MIT",
+  "scripts": {
+    "send": "node wa-send.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.20",
+    "qrcode-terminal": "^0.12.0"
   }
 }
