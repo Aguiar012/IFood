@@ -1,23 +1,29 @@
-name: WhatsApp — enviar mensagem
+# .github/workflows/send.yml
+name: send
 
 on:
   workflow_dispatch:
-    inputs:
-      text:
-        description: "Texto para enviar"
-        required: false
-        default: "Teste do GitHub Actions ✅"
 
 jobs:
   send:
-    # Dica: prefira self-hosted runner para evitar 405; mas com proxy residencial costuma conectar.
     runs-on: ubuntu-latest
+    env:
+      WA_TO: "5511932291930"
+      WA_TEXT: "Teste do GitHub Actions ✅"
+      WA_AUTH_DIR: "wa_auth"
+      # >>>>>> USE *SECRET* DO REPOSITÓRIO <<<<<<
+      # Formato DataImpulse (sticky + Brasil):
+      # http://LOGIN__cr.br:PASSWORD@gw.dataimpulse.com:10000
+      WA_PROXY_URL: ${{ secrets.WA_PROXY_URL }}
 
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
       - name: Restore Baileys auth cache
-        id: auth-restore
         uses: actions/cache/restore@v4
         with:
           path: wa_auth
@@ -25,26 +31,18 @@ jobs:
           restore-keys: |
             baileys-auth-
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Install deps
         run: npm i --no-audit --no-fund
 
-      - name: Enviar WhatsApp
-        env:
-          WA_TO: "5511932291930"
-          WA_TEXT: "${{ github.event.inputs.text }}"
-          WA_AUTH_DIR: "wa_auth"
-          # DataImpulse: país Brasil via __cr.br (country targeting); sticky port 10000
-          WA_PROXY_URL: "http://${{ secrets.DI_LOGIN }}__cr.br:${{ secrets.DI_PASSWORD }}@gw.dataimpulse.com:10000"
+      - name: Preflight - testa proxy (mostra IP)
+        run: npm run proxy:test
+
+      - name: Send message
         run: npm run send
 
       - name: Save Baileys auth cache
-        if: always()
         uses: actions/cache/save@v4
+        if: always()
         with:
           path: wa_auth
           key: baileys-auth-${{ github.run_id }}
