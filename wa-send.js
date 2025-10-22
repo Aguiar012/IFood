@@ -1,82 +1,84 @@
-// wa-send.js
-// Envia 1 mensagem via Baileys usando proxy HTTP(S) da DataImpulse
-// e imprime QR somente no primeiro login.
-
+// wa-send.js — Baileys com proxy + QR no terminal
 const fs = require('fs');
 const path = require('path');
 const P = require('pino');
+const qrcode = require('qrcode-terminal');
 const baileys = require('@whiskeysockets/baileys');
-const {
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-  Browsers
-} = baileys;
+const { useMultiFileAuthState, fetchLatestBaileysVersion, Browsers } = baileys;
 
-async function buildProxyAgent(proxyUrl) {
-  if (!proxyUrl) return undefined;
-  // https-proxy-agent v7 é ESM; usando import() dinâmico garante compat
+async function buildProxyAgent(url) {
+  if (!url) return undefined;
   const { HttpsProxyAgent } = await import('https-proxy-agent');
-  return new HttpsProxyAgent(proxyUrl);
+  return new HttpsProxyAgent(url); // vale para HTTPS e WebSocket (CONNECT)
 }
 
-async function waitOpenOrFail(sock, logger) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error('timeout esperando conexão')), 30000);
+async function main() {
+  const TO = process.env.WA_TO;                         // ex: 5511932...
+  const TEXT = process.env.WA_TEXT || 'Hello from Actions';
+  const AUTH_DIR = process.env.WA_AUTH_DIR || 'wa_auth';
+  const PROXY_URL = process.env.WA_PROXY_URL;          // ex: http://login__cr.br:pass@gw.dataimpulse.com:10000
 
-    sock.ev.on('connection.update', (u) => {
-      logger.info({ update: u }, 'connection.update');
-      if (u.connection === 'open') { clearTimeout(t); resolve(); }
-      if (u.connection === 'close') {
-        clearTimeout(t);
-        const err = u?.lastDisconnect?.error;
-        reject(err || new Error('conexão fechada'));
-      }
-    });
-  });
-}
+  fs.mkdirSync(AUTH_DIR, { recursive: true });
+  const logger = P({ level: 'info' });
+  logger.info({ to: TO, hasProxy: !!PROXY_URL }, 'boot');
 
-(async () => {
-  const to = process.env.WA_TO;                           // ex: 55119... (sem +)
-  const text = process.env.WA_TEXT || 'Hello from Actions';
-  const authDir = process.env.WA_AUTH_DIR || 'wa_auth';
-  const proxyUrl = process.env.WA_PROXY_URL;              // ex: http://LOGIN__cr.br:PWD@gw.dataimpulse.com:10000
-
-  const logger = P({ level: 'info' }); // troque para 'debug' se quiser mais verboso
-  logger.info({ to, authDir, hasProxy: !!proxyUrl }, 'boot');
-
-  // prepara auth e versão
-  const { state, saveCreds } = await useMultiFileAuthState(authDir);
-  const firstLogin = !fs.existsSync(path.join(authDir, 'creds.json'));
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
-
-  // proxy (1 agente para WS + fetch)
-  const agent = await buildProxyAgent(proxyUrl);
+  const agent = await buildProxyAgent(PROXY_URL);
 
   const sock = baileys.default({
     version,
     auth: state,
     logger,
     browser: Browsers.macOS('Chrome'),
-    printQRInTerminal: firstLogin, // QR só na primeira vez
-    agent,                         // WebSocket via proxy
-    fetchAgent: agent              // uploads/downloads via proxy
+    agent,                   // WebSocket via proxy
+    fetchAgent: agent        // downloads/uploads via proxy
   });
 
   sock.ev.on('creds.update', saveCreds);
 
-  try {
-    await waitOpenOrFail(sock, logger);
-  } catch (e) {
-    logger.error({ err: String(e) }, 'falha ao abrir conexão');
-    process.exit(1);
+  // Exibir QR manualmente quando o WA mandar
+  let opened = false;
+  const MAX_MS = 120000; // 2 minutos para você escanear
+  const start = Date.now();
+
+  sock.ev.on('connection.update', (u) => {
+    if (u.qr) {
+      console.log('\n=== ESCANEIE ESTE QR NO WHATSAPP ===');
+      qrcode.generate(u.qr, { small: true });
+      console.log('Caminho no app: WhatsApp > Aparelhos conectados > Conectar aparelho\n');
+    }
+    if (u.connection === 'open') {
+      opened = true;
+      console.log('✅ Conectado ao WhatsApp (sessão ativa).');
+    }
+    if (u.connection === 'close') {
+      const code = u.lastDisconnect?.error?.output?.statusCode;
+      console.error('❌ Conexão fechada. Code:', code);
+    }
+  });
+
+  // Espera abrir (ou estourar tempo)
+  while (!opened) {
+    if (Date.now() - start > MAX_MS) {
+      console.error('⏳ Timeout esperando o pareamento (QR). Tente novamente e escaneie o QR.');
+      process.exit(1);
+    }
+    await new Promise(r => setTimeout(r, 1000));
   }
 
-  const jid = `${to}@s.whatsapp.net`;
-  await sock.sendMessage(jid, { text });
-  logger.info({ to: jid }, 'mensagem enviada com sucesso');
+  // Envia mensagem
+  const jid = `${TO}@s.whatsapp.net`;
+  const sent = await sock.sendMessage(jid, { text: TEXT });
+  console.log('📤 Mensagem enviada. ID:', sent?.key?.id);
+
+  // Pequena espera p/ salvar credenciais
+  await new Promise(r => setTimeout(r, 1000));
+  try { await sock.ws.close(); } catch {}
   process.exit(0);
-})().catch((err) => {
-  console.error('fatal', err);
+}
+
+main().catch((e) => {
+  console.error('fatal:', e?.stack || e?.message || e);
   process.exit(1);
 });
