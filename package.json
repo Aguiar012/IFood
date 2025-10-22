@@ -7,9 +7,10 @@
     "proxy:test": "node -e \"(async()=>{const { request, ProxyAgent } = await import('undici'); const a=new ProxyAgent(process.env.WA_PROXY_URL); const r=await request('https://api.ipify.org', { dispatcher: a }); const b=await r.body.text(); console.log('IP via proxy:', b)})()\""
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
-    "pino": "^9.4.0",
+    "@whiskeysockets/baileys": "^6.7.20",
     "https-proxy-agent": "^7.0.6",
+    "pino": "^9.4.0",
+    "qrcode-terminal": "^0.12.0",
     "undici": "^7.16.0"
   }
 }
