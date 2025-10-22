@@ -1,84 +1,97 @@
-// wa-send.js — Baileys com proxy + QR no terminal
+// wa-send.js — Baileys com proxy + reconexão pós-pareamento
 const fs = require('fs');
 const path = require('path');
 const P = require('pino');
 const qrcode = require('qrcode-terminal');
+const { Boom } = require('@hapi/boom');
 const baileys = require('@whiskeysockets/baileys');
-const { useMultiFileAuthState, fetchLatestBaileysVersion, Browsers } = baileys;
+const {
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+  Browsers
+} = baileys;
 
 async function buildProxyAgent(url) {
   if (!url) return undefined;
   const { HttpsProxyAgent } = await import('https-proxy-agent');
-  return new HttpsProxyAgent(url); // vale para HTTPS e WebSocket (CONNECT)
+  return new HttpsProxyAgent(url); // HTTPS + WebSocket (CONNECT)
 }
 
-async function main() {
-  const TO = process.env.WA_TO;                         // ex: 5511932...
-  const TEXT = process.env.WA_TEXT || 'Hello from Actions';
-  const AUTH_DIR = process.env.WA_AUTH_DIR || 'wa_auth';
-  const PROXY_URL = process.env.WA_PROXY_URL;          // ex: http://login__cr.br:pass@gw.dataimpulse.com:10000
+const TO = process.env.WA_TO;                         // ex: 55119...
+const TEXT = process.env.WA_TEXT || 'Hello from Actions';
+const AUTH_DIR = process.env.WA_AUTH_DIR || 'wa_auth';
+const PROXY_URL = process.env.WA_PROXY_URL;
 
+const logger = P({ level: 'info' });
+
+let sendDone = false; // pra não enviar duas vezes em reconexões
+
+(async () => {
   fs.mkdirSync(AUTH_DIR, { recursive: true });
-  const logger = P({ level: 'info' });
-  logger.info({ to: TO, hasProxy: !!PROXY_URL }, 'boot');
-
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
   const agent = await buildProxyAgent(PROXY_URL);
 
-  const sock = baileys.default({
-    version,
-    auth: state,
-    logger,
-    browser: Browsers.macOS('Chrome'),
-    agent,                   // WebSocket via proxy
-    fetchAgent: agent        // downloads/uploads via proxy
-  });
+  logger.info({ to: TO, hasProxy: !!PROXY_URL }, 'boot');
 
-  sock.ev.on('creds.update', saveCreds);
+  async function startSock() {
+    const sock = baileys.default({
+      version,
+      auth: state,
+      logger,
+      browser: Browsers.macOS('Chrome'),
+      agent,
+      fetchAgent: agent
+    });
 
-  // Exibir QR manualmente quando o WA mandar
-  let opened = false;
-  const MAX_MS = 120000; // 2 minutos para você escanear
-  const start = Date.now();
+    sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', (u) => {
-    if (u.qr) {
-      console.log('\n=== ESCANEIE ESTE QR NO WHATSAPP ===');
-      qrcode.generate(u.qr, { small: true });
-      console.log('Caminho no app: WhatsApp > Aparelhos conectados > Conectar aparelho\n');
-    }
-    if (u.connection === 'open') {
-      opened = true;
-      console.log('✅ Conectado ao WhatsApp (sessão ativa).');
-    }
-    if (u.connection === 'close') {
-      const code = u.lastDisconnect?.error?.output?.statusCode;
-      console.error('❌ Conexão fechada. Code:', code);
-    }
-  });
+    sock.ev.on('connection.update', (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-  // Espera abrir (ou estourar tempo)
-  while (!opened) {
-    if (Date.now() - start > MAX_MS) {
-      console.error('⏳ Timeout esperando o pareamento (QR). Tente novamente e escaneie o QR.');
-      process.exit(1);
-    }
-    await new Promise(r => setTimeout(r, 1000));
+      // QR quando necessário
+      if (qr) {
+        console.log('\n=== ESCANEIE ESTE QR NO WHATSAPP ===');
+        qrcode.generate(qr, { small: true });
+        console.log('WhatsApp > Aparelhos conectados > Conectar aparelho\n');
+      }
+
+      if (connection === 'open') {
+        console.log('✅ Conectado ao WhatsApp.');
+        if (!sendDone) {
+          sendDone = true;
+          const jid = `${TO}@s.whatsapp.net`;
+          sock.sendMessage(jid, { text: TEXT })
+            .then((sent) => {
+              console.log('📤 Mensagem enviada. ID:', sent?.key?.id);
+              setTimeout(() => process.exit(0), 800);
+            })
+            .catch((e) => {
+              console.error('❌ Falha ao enviar:', e?.message || e);
+              process.exit(1);
+            });
+        }
+      }
+
+      if (connection === 'close') {
+        const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
+        console.error('⚠️ Conexão fechada. Status:', status);
+
+        // Se não é logout definitivo, REINICIA (necessário após o 515)
+        const shouldReconnect = status !== DisconnectReason.loggedOut;
+        if (shouldReconnect) {
+          // pequena espera pra evitar loop muito agressivo
+          setTimeout(() => startSock(), 800);
+        } else {
+          console.error('Sessão encerrada (loggedOut). Exclua o cache para parear de novo.');
+          process.exit(1);
+        }
+      }
+    });
+
+    return sock;
   }
 
-  // Envia mensagem
-  const jid = `${TO}@s.whatsapp.net`;
-  const sent = await sock.sendMessage(jid, { text: TEXT });
-  console.log('📤 Mensagem enviada. ID:', sent?.key?.id);
-
-  // Pequena espera p/ salvar credenciais
-  await new Promise(r => setTimeout(r, 1000));
-  try { await sock.ws.close(); } catch {}
-  process.exit(0);
-}
-
-main().catch((e) => {
-  console.error('fatal:', e?.stack || e?.message || e);
-  process.exit(1);
-});
+  await startSock();
+})();
