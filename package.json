@@ -1,16 +1,22 @@
 {
-  "name": "wa-actions-bot",
+  "name": "ifsp-alert-bot",
   "version": "1.0.0",
-  "type": "commonjs",
-  "scripts": {
+  "type": "module",
+    "scripts": {
     "send": "node wa-send.js",
     "proxy:test": "node -e \"(async()=>{const { request, ProxyAgent } = await import('undici'); const a=new ProxyAgent(process.env.WA_PROXY_URL); const r=await request('https://api.ipify.org', { dispatcher: a }); const b=await r.body.text(); console.log('IP via proxy:', b)})()\""
   },
+  "main": "app.js",
+  "license": "MIT",
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.20",
-    "@hapi/boom": "^10.0.1",
-    "https-proxy-agent": "^7.0.6",
-    "pino": "^9.4.0",
+    "@hapi/boom": "^10.0.0",
+    "@whiskeysockets/baileys": "^6.6.0",
+    "express": "^4.19.2",
+    "googleapis": "^130.0.0",
+    "https-proxy-agent": "^7.0.2",
+    "node-cron": "^3.0.3",
+    "openai": "^4.59.1",
+    "pino": "^9.0.0",
     "qrcode-terminal": "^0.12.0",
     "undici": "^7.16.0"
   }
