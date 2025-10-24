@@ -10,7 +10,7 @@
     "express": "4.19.2",
     "https-proxy-agent": "7.0.4",
     "imap-simple": "5.1.0",
-    "mailparser": "3.10.1",
+    "mailparser": "^3.0.0",
     "node-cron": "3.0.3",
     "openai": "4.59.1",
     "pino": "9.4.0",
