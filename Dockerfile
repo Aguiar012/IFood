@@ -1,32 +1,35 @@
-# Dockerfile robusto
+# Dockerfile ultra-tolerante
 FROM node:20-bookworm-slim
 
 ENV NODE_ENV=production
 WORKDIR /app
 
-# toolchain + git p/ eventuais builds nativos / deps via git
+# toolchain para possíveis builds nativos + git
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 make g++ git ca-certificates && \
+    apt-get install -y --no-install-recommends python3 make g++ git ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
-# ajuda em redes instáveis
-RUN npm config set fetch-retries 5 \
- && npm config set fetch-retry-maxtimeout 60000 \
- && npm config set fetch-retry-mintimeout 20000 \
- && npm config set legacy-peer-deps true \
- && npm config set registry https://registry.npmjs.org/
-
-COPY package*.json ./
-
-# se houver lock usa ci; se não, cai para install
-RUN if [ -f package-lock.json ]; then \
-      npm ci --no-audit --no-fund --legacy-peer-deps --no-optional ; \
-    else \
-      npm install --no-audit --no-fund --legacy-peer-deps --no-optional ; \
-    fi
-
+# Copia tudo primeiro (vamos instalar em runtime)
 COPY . .
+
+# Dicas ao npm para reduzir conflitos e dar verbosidade
+ENV NPM_CONFIG_LEGACY_PEER_DEPS=true \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false \
+    NPM_CONFIG_LOGLEVEL=verbose \
+    NPM_CONFIG_FETCH_RETRIES=5 \
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=20000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=60000
 
 ENV PORT=3000
 EXPOSE 3000
-CMD ["node","app.js"]
+
+# 1) tenta npm ci se existir lock; 2) cai para npm install;
+# 3) se der ruim, tenta novamente com --force; 4) inicia o app
+CMD bash -lc '\
+  if [ -f package-lock.json ]; then \
+    echo ">> npm ci"; npm ci --no-optional || (echo ">> npm ci falhou, tentando npm install" && npm install --no-optional); \
+  else \
+    echo ">> npm install"; npm install --no-optional || (echo ">> npm install falhou, tentando com --force" && npm install --no-optional --force); \
+  fi && \
+  echo ">> deps instaladas, iniciando app" && node app.js'
