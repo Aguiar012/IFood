@@ -62,7 +62,6 @@ app.use(express.json());
 
 // ---------- OpenAI (classificação) ----------
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-
 async function classifyImportance(subject, body) {
   const schema = {
     name: "ImportanceSchema",
@@ -81,17 +80,29 @@ async function classifyImportance(subject, body) {
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
-      { role: "system", content: "Você é um classificador de avisos escolares. Responda apenas em JSON válido." },
-      { role: "user", content:
+      {
+        role: "system",
+        content: "Você é um classificador de avisos escolares. Responda apenas em JSON válido."
+      },
+      {
+        role: "user",
+        content:
 `Assunto: ${subject}
 
 Corpo:
 ${body}
 
-Regras:
-- Dê nota 0–10 em 'importance'
-- 9–10 = afeta se o aluno sai de casa (ex.: cancelou aula hoje/amanhã)
-- Explique 'reason' e faça 'short_summary' (<=140 chars)` }
+Regras de pontuação (inteiro 0–10):
+- 9–10 (muito urgente): cancela/adianta/atrasa aula de HOJE ou AMANHÃ; troca de sala/horário para hoje/amanhã; prazos em < 48h.
+- 7–8 (importante na semana): cronograma ou instruções que valem para ESTA SEMANA (ex.: "até esta sexta-feira"); abertura de tarefa no Moodle com prazo nesta semana; "em anexo" com CRONOGRAMA/ORGANIZAÇÃO; prova/trabalho marcado para a semana atual.
+- 5–6 (médio): informativo relevante, mas sem ação/pr Prazo nesta semana.
+- 0–4 (baixo): comunicados sem ação, parabéns, conteúdo que não exige atenção próxima.
+
+Notas:
+- Detecte palavras como: hoje, amanhã, sexta-feira, cronograma, anexo, Moodle, prova, trabalho, prazo, entrega.
+- Se mencionar "em anexo" com cronograma/organização do bimestre e valer nesta semana, prefira 7–8.
+- Devolva: { "importance": INT, "reason": TEXTO CURTO, "short_summary": TEXTO <= 140 chars }`
+      }
     ],
     response_format: { type: "json_schema", json_schema: schema }
   });
