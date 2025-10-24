@@ -4,14 +4,23 @@ import cron from "node-cron";
 import OpenAI from "openai";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
-import * as baileys from "@whiskeysockets/baileys";
+// SUBSTITUA todo o bloco de import do Baileys por isto:
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const baileys = require("@whiskeysockets/baileys");
+
+const makeWASocket =
+  (typeof baileys?.default === "function" && baileys.default) ||
+  (typeof baileys?.makeWASocket === "function" && baileys.makeWASocket) ||
+  baileys; // fallback CJS
+
 const {
-  default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers
 } = baileys;
+
 import fs from "fs";
 import path from "path";
 import https from "https";
