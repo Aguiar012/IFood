@@ -5,13 +5,25 @@ import OpenAI from "openai";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
 import * as baileys from "@whiskeysockets/baileys";
+// resolve o export default de forma segura
+const makeWASocket =
+  typeof baileys?.default === "function" ? baileys.default :
+  typeof baileys?.makeWASocket === "function" ? baileys.makeWASocket :
+  null;
+
+// exports auxiliares
 const {
-  default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers
 } = baileys;
+
+if (!makeWASocket) {
+  console.error("❌ Baileys import mal-resolvido:", Object.keys(baileys || {}));
+  throw new Error("Baileys import failure: makeWASocket não é função");
+}
+
 import fs from "fs";
 import path from "path";
 import https from "https";
@@ -40,6 +52,10 @@ fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
 const logger = P({ level: "info" });
 const app = express();
 app.use(express.json());
+
+const { version } = await fetchLatestBaileysVersion();
+logger.info({ version }, "Baileys version");
+
 
 // ---------- OpenAI (classificação) ----------
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
