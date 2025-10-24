@@ -201,14 +201,16 @@ async function checkIMAPOnce() {
       catch (e) { logger.error(e, "falha na classificação OpenAI"); }
 
       if (cls.importance >= IMPORTANCE_THRESHOLD) {
-        const text = `⚠️ *AVISO IMPORTANTE* (score ${cls.importance})
-De: ${from}
-Assunto: ${subject}
-Quando: ${date}
-— Resumo —
-${cls.short_summary}
-
-(motivo: ${cls.reason})`;
+        const now = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+      
+        // “email puro” (prioriza texto; se vier só HTML, tira as tags grosseiramente)
+        const plain =
+          parsed.text ||
+          (parsed.html ? parsed.html.replace(/<[^>]+>/g, " ") : "") ||
+          "";
+      
+        const text = `Mensagem do SUAP agora ${now}:\n\nAssunto: ${subject}\nDe: ${from}\n\n${plain}`.slice(0, 3500);
+      
         try {
           const id = await sendWA(WA_TO, text);
           logger.info({ id }, "WhatsApp enviado");
@@ -216,6 +218,7 @@ ${cls.short_summary}
           logger.error(e, "falha ao enviar no WhatsApp");
         }
       }
+
 
       state.seenIds.push(msgId);
       state.seenIds = state.seenIds.slice(-500);
