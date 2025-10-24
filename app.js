@@ -46,6 +46,16 @@ const CRON_EXPR = process.env.POLL_CRON || "*/1 * * * *"; // a cada 1 min
 const STATE_FILE = process.env.STATE_PATH || "state.json";
 fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
 
+// ---- Histórico de classificações (persistente) ----
+const IMPORTANCE_LOG_LIMIT = Number(process.env.IMPORTANCE_LOG_LIMIT || "50");
+const SCORES_FILE = process.env.SCORES_PATH || path.join(path.dirname(STATE_FILE), "scores.json");
+
+function loadScores() { try { return JSON.parse(fs.readFileSync(SCORES_FILE, "utf8")); } catch { return []; } }
+function saveScores(list) { fs.writeFileSync(SCORES_FILE, JSON.stringify(list)); }
+
+let lastScores = loadScores();
+
+
 const logger = P({ level: "info" });
 const app = express();
 app.use(express.json());
@@ -200,6 +210,27 @@ async function checkIMAPOnce() {
       try { cls = await classifyImportance(subject, body); }
       catch (e) { logger.error(e, "falha na classificação OpenAI"); }
 
+      // registra a classificação (passando ou não)
+      const record = {
+        ts: new Date().toISOString(),
+        from,
+        subject,
+        importance: cls.importance,
+        reason: cls.reason,
+        summary: cls.short_summary
+      };
+      lastScores.push(record);
+      lastScores = lastScores.slice(-IMPORTANCE_LOG_LIMIT);
+      saveScores(lastScores);
+      
+      // se NÃO passou no limiar, deixa claro no log
+      if (cls.importance < IMPORTANCE_THRESHOLD) {
+        logger.info(
+          { importance: cls.importance, threshold: IMPORTANCE_THRESHOLD, subject },
+          "descartado por importância (< threshold)"
+        );
+      }
+
       if (cls.importance >= IMPORTANCE_THRESHOLD) {
         const now = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
       
@@ -270,6 +301,52 @@ app.get("/debug/proxy-ip", async (_req, res) => {
     req.end();
   } catch (e) { res.status(500).send(String(e)); }
 });
+
+
+
+// ---- Visualizador de importância ----
+app.get("/importance.json", (_req, res) => {
+  res.json({
+    threshold: IMPORTANCE_THRESHOLD,
+    count: lastScores.length,
+    items: [...lastScores].reverse() // mais recentes primeiro
+  });
+});
+
+app.get("/importance", (_req, res) => {
+  const rows = [...lastScores].reverse().map(r => `
+    <tr>
+      <td>${new Date(r.ts).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</td>
+      <td>${(r.importance ?? "").toString()}</td>
+      <td>${String(r.subject || "").replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</td>
+      <td>${String(r.from || "").replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</td>
+      <td>${String(r.summary || "").replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</td>
+      <td>${String(r.reason || "").replace(/[<>&]/g, s => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[s]))}</td>
+    </tr>
+  `).join("");
+
+  res.set("content-type","text/html").send(`<!doctype html>
+  <meta name=viewport content="width=device-width,initial-scale=1">
+  <title>Importância dos e-mails</title>
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;padding:16px}
+    table{width:100%;border-collapse:collapse}
+    th,td{border:1px solid #ddd;padding:8px;vertical-align:top}
+    th{background:#f5f5f5}
+    tr:nth-child(even){background:#fafafa}
+    code{background:#f3f3f3;padding:2px 4px;border-radius:4px}
+  </style>
+  <h1>Classificações de importância</h1>
+  <p>Limiar atual: <code>${IMPORTANCE_THRESHOLD}</code> • Total guardado: <code>${lastScores.length}</code></p>
+  <p>API: <a href="/importance.json">/importance.json</a></p>
+  <table>
+    <thead><tr>
+      <th>Quando (SP)</th><th>Score</th><th>Assunto</th><th>De</th><th>Resumo</th><th>Motivo</th>
+    </tr></thead>
+    <tbody>${rows || "<tr><td colspan=6>(vazio)</td></tr>"}</tbody>
+  </table>`);
+});
+
 
 // ---------- HTTP util ----------
 app.get("/", (_req, res) => res.send("ok"));
