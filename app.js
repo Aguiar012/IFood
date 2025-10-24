@@ -5,25 +5,13 @@ import OpenAI from "openai";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
 import * as baileys from "@whiskeysockets/baileys";
-// resolve o export default de forma segura
-const makeWASocket =
-  typeof baileys?.default === "function" ? baileys.default :
-  typeof baileys?.makeWASocket === "function" ? baileys.makeWASocket :
-  null;
-
-// exports auxiliares
 const {
+  default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers
 } = baileys;
-
-if (!makeWASocket) {
-  console.error("❌ Baileys import mal-resolvido:", Object.keys(baileys || {}));
-  throw new Error("Baileys import failure: makeWASocket não é função");
-}
-
 import fs from "fs";
 import path from "path";
 import https from "https";
@@ -52,10 +40,6 @@ fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
 const logger = P({ level: "info" });
 const app = express();
 app.use(express.json());
-
-const { version } = await fetchLatestBaileysVersion();
-logger.info({ version }, "Baileys version");
-
 
 // ---------- OpenAI (classificação) ----------
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -98,6 +82,7 @@ Regras:
 
 // ---------- WhatsApp (Baileys) ----------
 let sock, waReady = false;
+globalThis.__lastQR = ""; // para servir o QR em /qr
 
 async function buildProxyAgent(url) {
   if (!url) return undefined;
@@ -108,6 +93,7 @@ async function buildProxyAgent(url) {
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
+  logger.info({ version }, "Baileys version");
   const agent = await buildProxyAgent(PROXY_URL);
 
   sock = makeWASocket({
@@ -125,9 +111,10 @@ async function startWA() {
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) {
+      globalThis.__lastQR = qr; // guarda o QR para /qr
       console.log("\n=== ESCANEIE ESTE QR NO WHATSAPP ===");
       qrcode.generate(qr, { small: true });
-      console.log("WhatsApp > Aparelhos conectados > Conectar aparelho\n");
+      console.log("Dica: acesse /qr para ver a imagem grande.\n");
     }
     if (connection === "open") { waReady = true; logger.info("WA conectado"); }
     if (connection === "close") {
@@ -140,12 +127,8 @@ async function startWA() {
     }
   });
 
-  // salva credenciais ao encerrar (graceful)
   for (const sig of ["SIGINT","SIGTERM"]) {
-    process.on(sig, async () => {
-      try { await saveCreds(); } catch {}
-      process.exit(0);
-    });
+    process.on(sig, async () => { try { await saveCreds(); } catch {} process.exit(0); });
   }
 }
 
@@ -186,9 +169,8 @@ async function checkIMAPOnce() {
   const connection = await Imap.connect(IMAP_CONFIG);
   try {
     await connection.openBox("INBOX");
-    // Busca: e-mails não lidos do remetente de teste
     const criteria = ["UNSEEN", ["FROM", EMAIL_FILTER_FROM]];
-    const fetchOptions = { bodies: [""], markSeen: false }; // "" = RFC822 (mensagem completa)
+    const fetchOptions = { bodies: [""], markSeen: false }; // "" = RFC822
 
     const results = await connection.search(criteria, fetchOptions);
     for (const res of results) {
@@ -206,11 +188,8 @@ async function checkIMAPOnce() {
 
       logger.info({ from, subject }, "novo e-mail (IMAP)");
       let cls = { importance: 0, reason: "", short_summary: "" };
-      try {
-        cls = await classifyImportance(subject, body);
-      } catch (e) {
-        logger.error(e, "falha na classificação OpenAI");
-      }
+      try { cls = await classifyImportance(subject, body); }
+      catch (e) { logger.error(e, "falha na classificação OpenAI"); }
 
       if (cls.importance >= IMPORTANCE_THRESHOLD) {
         const text = `⚠️ *AVISO IMPORTANTE* (score ${cls.importance})
@@ -240,7 +219,27 @@ ${cls.short_summary}
   }
 }
 
-// ---------- ENDPOINT opcional p/ verificar IP via proxy ----------
+// ---------- /qr (QR em imagem grande para escanear) ----------
+app.get("/qr", (_req, res) => {
+  const qr = globalThis.__lastQR || "";
+  if (!qr) return res.status(404).send("QR ainda não gerado. Aguarde reconexão.");
+  res.set("content-type","text/html");
+  res.end(`<!doctype html>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>WhatsApp QR</title>
+<style>
+  body{margin:0;display:grid;place-items:center;height:100vh;background:#fff}
+</style>
+<div id="qrcode"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+  new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(qr)}, width: 360, height: 360, correctLevel: QRCode.CorrectLevel.M });
+  // auto-refresh a cada 15s (QR do WA expira)
+  setTimeout(()=>location.reload(),15000);
+</script>`);
+});
+
+// ---------- debug opcional: IP de saída pelo proxy ----------
 let _proxyAgent;
 async function getProxyAgent() {
   if (_proxyAgent) return _proxyAgent;
