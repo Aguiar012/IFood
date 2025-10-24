@@ -4,13 +4,17 @@ import cron from "node-cron";
 import OpenAI from "openai";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
-import makeWASocket, {
+import * as baileys from "@whiskeysockets/baileys";
+const {
+  default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers
-} from "@whiskeysockets/baileys";
+} = baileys;
 import fs from "fs";
+import path from "path";
+import https from "https";
 
 import Imap from "imap-simple";
 import { simpleParser } from "mailparser";
@@ -29,8 +33,13 @@ const EMAIL_FILTER_FROM = process.env.EMAIL_FILTER_FROM || "xraiquzaxa@gmail.com
 const IMPORTANCE_THRESHOLD = Number(process.env.IMPORTANCE_THRESHOLD || "8");
 const CRON_EXPR = process.env.POLL_CRON || "*/1 * * * *"; // a cada 1 min
 
+// Estado (arquivo pode ir para volume com STATE_PATH)
+const STATE_FILE = process.env.STATE_PATH || "state.json";
+fs.mkdirSync(path.dirname(STATE_FILE), { recursive: true });
+
 const logger = P({ level: "info" });
-const app = express(); app.use(express.json());
+const app = express();
+app.use(express.json());
 
 // ---------- OpenAI (classificação) ----------
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -114,6 +123,14 @@ async function startWA() {
       else logger.error("loggedOut — apague a pasta wa_auth para parear novamente.");
     }
   });
+
+  // salva credenciais ao encerrar (graceful)
+  for (const sig of ["SIGINT","SIGTERM"]) {
+    process.on(sig, async () => {
+      try { await saveCreds(); } catch {}
+      process.exit(0);
+    });
+  }
 }
 
 function toJid(to) {
@@ -129,7 +146,6 @@ async function sendWA(to, text) {
 }
 
 // ---------- Estado simples (de-dupe) ----------
-const STATE_FILE = "state.json";
 function loadState() { try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch { return { seenIds: [] }; } }
 function saveState(s) { fs.writeFileSync(STATE_FILE, JSON.stringify(s)); }
 const state = loadState();
@@ -154,7 +170,7 @@ async function checkIMAPOnce() {
   const connection = await Imap.connect(IMAP_CONFIG);
   try {
     await connection.openBox("INBOX");
-    // Busca: e-mails não lidos do remetente de teste (evita variações de SINCE)
+    // Busca: e-mails não lidos do remetente de teste
     const criteria = ["UNSEEN", ["FROM", EMAIL_FILTER_FROM]];
     const fetchOptions = { bodies: [""], markSeen: false }; // "" = RFC822 (mensagem completa)
 
@@ -207,6 +223,26 @@ ${cls.short_summary}
     await connection.end();
   }
 }
+
+// ---------- ENDPOINT opcional p/ verificar IP via proxy ----------
+let _proxyAgent;
+async function getProxyAgent() {
+  if (_proxyAgent) return _proxyAgent;
+  if (!PROXY_URL) return undefined;
+  const { HttpsProxyAgent } = await import("https-proxy-agent");
+  _proxyAgent = new HttpsProxyAgent(PROXY_URL);
+  return _proxyAgent;
+}
+app.get("/debug/proxy-ip", async (_req, res) => {
+  try {
+    const agent = await getProxyAgent();
+    const req = https.request({ host: "api.ipify.org", path: "/?format=json", agent }, r => {
+      let data=""; r.on("data", d => data+=d); r.on("end", () => res.type("json").send(data));
+    });
+    req.on("error", e => res.status(500).send(String(e)));
+    req.end();
+  } catch (e) { res.status(500).send(String(e)); }
+});
 
 // ---------- HTTP util ----------
 app.get("/", (_req, res) => res.send("ok"));
