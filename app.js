@@ -2,7 +2,6 @@ import express from "express";
 import P from "pino";
 import cron from "node-cron";
 import OpenAI from "openai";
-import { google } from "googleapis";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
 import makeWASocket, {
@@ -11,23 +10,27 @@ import makeWASocket, {
   DisconnectReason,
   Browsers
 } from "@whiskeysockets/baileys";
+import fs from "fs";
+
+import Imap from "imap-simple";
+import { simpleParser } from "mailparser";
 
 // ---------- ENV ----------
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const WA_TO = process.env.WA_TO || ""; // ex: 55119... (número) ou ...@g.us (grupo)
-const PROXY_URL = process.env.PROXY_URL || ""; // ex: http://user:pass@host:port (DataImpulse)
+const WA_TO = process.env.WA_TO || "";           // 55119... ou ...@g.us
+const PROXY_URL = process.env.PROXY_URL || "";   // DataImpulse: http://USER:PASS@HOST:PORT
 const WA_AUTH_DIR = process.env.WA_AUTH_DIR || "wa_auth";
-const GMAIL_CLIENT_ID = process.env.GMAIL_CLIENT_ID || "";
-const GMAIL_CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET || "";
-const GMAIL_REDIRECT_URI = process.env.GMAIL_REDIRECT_URI || ""; // https://seu-servico.northflank.app/oauth/callback
-const GMAIL_QUERY = process.env.GMAIL_QUERY || 'from:xraiquzaxa@gmail.com newer_than:2d';
+
+const EMAIL_USER = process.env.EMAIL_USER;       // conta Gmail do BOT (com 2FA)
+const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD; // App password (16 chars, sem espaços)
+const EMAIL_FILTER_FROM = process.env.EMAIL_FILTER_FROM || "xraiquzaxa@gmail.com"; // remetente de teste
+
 const IMPORTANCE_THRESHOLD = Number(process.env.IMPORTANCE_THRESHOLD || "8");
 const CRON_EXPR = process.env.POLL_CRON || "*/1 * * * *"; // a cada 1 min
 
 const logger = P({ level: "info" });
-const app = express();
-app.use(express.json());
+const app = express(); app.use(express.json());
 
 // ---------- OpenAI (classificação) ----------
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
@@ -42,30 +45,39 @@ async function classifyImportance(subject, body) {
         reason: { type: "string" },
         short_summary: { type: "string" }
       },
-      required: ["importance", "reason", "short_summary"],
+      required: ["importance","reason","short_summary"],
       additionalProperties: false
     }
   };
-  const prompt = `Assunto: ${subject}\n\nCorpo:\n${body}\n\nRegras:\n- Dê nota 0–10 para 'importance'\n- 9–10 = afeta se aluno sai de casa (ex.: cancelou aula hoje/amanhã)\n- Explique 'reason' e faça 'short_summary' (<=140 chars)`;
+
   const resp = await openai.chat.completions.create({
     model: "gpt-4o-mini",
     messages: [
       { role: "system", content: "Você é um classificador de avisos escolares. Responda apenas em JSON válido." },
-      { role: "user", content: prompt }
+      { role: "user", content:
+`Assunto: ${subject}
+
+Corpo:
+${body}
+
+Regras:
+- Dê nota 0–10 em 'importance'
+- 9–10 = afeta se o aluno sai de casa (ex.: cancelou aula hoje/amanhã)
+- Explique 'reason' e faça 'short_summary' (<=140 chars)` }
     ],
     response_format: { type: "json_schema", json_schema: schema }
   });
+
   return JSON.parse(resp.choices[0].message.content);
 }
 
 // ---------- WhatsApp (Baileys) ----------
 let sock, waReady = false;
-const seenMsgIds = new Set();
 
 async function buildProxyAgent(url) {
   if (!url) return undefined;
   const { HttpsProxyAgent } = await import("https-proxy-agent");
-  return new HttpsProxyAgent(url);
+  return new HttpsProxyAgent(url); // HTTPS + WS CONNECT
 }
 
 async function startWA() {
@@ -92,10 +104,7 @@ async function startWA() {
       qrcode.generate(qr, { small: true });
       console.log("WhatsApp > Aparelhos conectados > Conectar aparelho\n");
     }
-    if (connection === "open") {
-      waReady = true;
-      logger.info("WA conectado");
-    }
+    if (connection === "open") { waReady = true; logger.info("WA conectado"); }
     if (connection === "close") {
       const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
       waReady = false;
@@ -103,26 +112,6 @@ async function startWA() {
       logger.warn({ status }, "WA desconectado");
       if (shouldReconnect) setTimeout(startWA, 1500);
       else logger.error("loggedOut — apague a pasta wa_auth para parear novamente.");
-    }
-  });
-
-  sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-    for (const m of messages) {
-      if (!m.message || m.key.fromMe) continue;
-      const id = m.key.id;
-      if (seenMsgIds.has(id)) continue;
-      seenMsgIds.add(id);
-      setTimeout(() => seenMsgIds.delete(id), 10 * 60 * 1000);
-
-      const jid = m.key.remoteJid;
-      const text =
-        m.message.conversation ||
-        m.message.extendedTextMessage?.text ||
-        m.message.imageMessage?.caption ||
-        "";
-      logger.info({ jid, text }, "mensagem recebida");
-      // (opcional) aqui você poderia responder automaticamente se quiser
     }
   });
 }
@@ -139,121 +128,60 @@ async function sendWA(to, text) {
   return sent?.key?.id;
 }
 
-// ---------- Gmail (OAuth + polling) ----------
-const oauth2 = new google.auth.OAuth2(
-  GMAIL_CLIENT_ID,
-  GMAIL_CLIENT_SECRET,
-  GMAIL_REDIRECT_URI
-);
-const gmail = google.gmail({ version: "v1", auth: oauth2 });
-
-// persistência simples em arquivo
-import fs from "fs";
+// ---------- Estado simples (de-dupe) ----------
 const STATE_FILE = "state.json";
-function loadState() {
-  try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); }
-  catch { return { seenEmailIds: [] }; }
-}
-function saveState(s) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(s));
-}
+function loadState() { try { return JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch { return { seenIds: [] }; } }
+function saveState(s) { fs.writeFileSync(STATE_FILE, JSON.stringify(s)); }
 const state = loadState();
 
-// tokens do Gmail
-const TOKEN_FILE = "gmail_token.json";
-function loadToken() {
-  try {
-    const t = JSON.parse(fs.readFileSync(TOKEN_FILE, "utf8"));
-    oauth2.setCredentials(t);
-    return !!t.refresh_token || !!t.access_token;
-  } catch { return false; }
-}
-function saveToken(t) {
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify(t));
-}
+// ---------- IMAP (Gmail via App Password) ----------
+const IMAP_CONFIG = {
+  imap: {
+    user: EMAIL_USER,
+    password: EMAIL_APP_PASSWORD,
+    host: "imap.gmail.com",
+    port: 993,
+    tls: true,
+    authTimeout: 30000
+  }
+};
 
-app.get("/oauth/init", (_req, res) => {
-  if (!GMAIL_CLIENT_ID || !GMAIL_CLIENT_SECRET || !GMAIL_REDIRECT_URI) {
-    return res.status(400).send("Defina GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET e GMAIL_REDIRECT_URI");
-  }
-  const url = oauth2.generateAuthUrl({
-    access_type: "offline",
-    scope: ["https://www.googleapis.com/auth/gmail.readonly", "email", "profile"],
-    prompt: "consent"
-  });
-  res.redirect(url);
-});
-
-app.get("/oauth/callback", async (req, res) => {
-  try {
-    const { code } = req.query;
-    const { tokens } = await oauth2.getToken(code);
-    oauth2.setCredentials(tokens);
-    saveToken(tokens);
-    return res.send("✅ Gmail conectado! Pode fechar esta aba.");
-  } catch (e) {
-    logger.error(e);
-    res.status(500).send("Erro no OAuth: " + (e?.message || e));
-  }
-});
-
-function b64uToStr(b64u) {
-  return Buffer.from(b64u.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-}
-function extractBody(payload) {
-  // tenta text/plain, senão text/html
-  if (payload?.mimeType === "text/plain" && payload?.body?.data) {
-    return b64uToStr(payload.body.data);
-  }
-  if (payload?.parts) {
-    for (const p of payload.parts) {
-      const r = extractBody(p);
-      if (r) return r;
-    }
-  }
-  if (payload?.mimeType === "text/html" && payload?.body?.data) {
-    const html = b64uToStr(payload.body.data);
-    return html.replace(/<[^>]+>/g, " "); // simplão: tira tags
-  }
-  return "";
-}
-function getHeader(headers, name) {
-  return (headers || []).find(h => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
-}
-
-async function checkGmailOnce() {
-  if (!loadToken()) {
-    logger.warn("Gmail ainda não autenticado. Acesse /oauth/init");
+async function checkIMAPOnce() {
+  if (!EMAIL_USER || !EMAIL_APP_PASSWORD) {
+    logger.warn("IMAP não configurado (EMAIL_USER/EMAIL_APP_PASSWORD).");
     return;
   }
-  const list = await gmail.users.messages.list({
-    userId: "me",
-    q: GMAIL_QUERY,
-    maxResults: 10
-  });
-  const ids = list.data.messages?.map(m => m.id) || [];
-  for (const id of ids) {
-    if (state.seenEmailIds.includes(id)) continue;
-    const msg = await gmail.users.messages.get({ userId: "me", id, format: "full" });
-    const headers = msg.data.payload?.headers || [];
-    const subject = getHeader(headers, "Subject");
-    const from = getHeader(headers, "From");
-    const date = getHeader(headers, "Date");
-    const body = extractBody(msg.data.payload) || msg.data.snippet || "";
+  const connection = await Imap.connect(IMAP_CONFIG);
+  try {
+    await connection.openBox("INBOX");
+    // Busca: e-mails não lidos do remetente de teste (evita variações de SINCE)
+    const criteria = ["UNSEEN", ["FROM", EMAIL_FILTER_FROM]];
+    const fetchOptions = { bodies: [""], markSeen: false }; // "" = RFC822 (mensagem completa)
 
-    logger.info({ from, subject }, "novo e-mail");
+    const results = await connection.search(criteria, fetchOptions);
+    for (const res of results) {
+      const part = res.parts.find(p => p.which === "");
+      if (!part?.body) continue;
 
-    // classificar
-    let cls = { importance: 0, reason: "", short_summary: "" };
-    try {
-      cls = await classifyImportance(subject, body);
-    } catch (e) {
-      logger.error(e, "falha na classificação");
-    }
+      const parsed = await simpleParser(part.body);
+      const msgId = parsed.messageId || `${parsed.subject}-${parsed.date}`;
+      if (state.seenIds.includes(msgId)) continue;
 
-    // se importante, enviar no WhatsApp
-    if (cls.importance >= IMPORTANCE_THRESHOLD) {
-      const text = `⚠️ *AVISO IMPORTANTE* (score ${cls.importance})
+      const subject = parsed.subject || "";
+      const from = parsed.from?.text || "";
+      const date = parsed.date ? new Date(parsed.date).toString() : "";
+      const body = parsed.text || parsed.html || parsed.textAsHtml || "";
+
+      logger.info({ from, subject }, "novo e-mail (IMAP)");
+      let cls = { importance: 0, reason: "", short_summary: "" };
+      try {
+        cls = await classifyImportance(subject, body);
+      } catch (e) {
+        logger.error(e, "falha na classificação OpenAI");
+      }
+
+      if (cls.importance >= IMPORTANCE_THRESHOLD) {
+        const text = `⚠️ *AVISO IMPORTANTE* (score ${cls.importance})
 De: ${from}
 Assunto: ${subject}
 Quando: ${date}
@@ -261,22 +189,26 @@ Quando: ${date}
 ${cls.short_summary}
 
 (motivo: ${cls.reason})`;
-      try {
-        const id = await sendWA(WA_TO, text);
-        logger.info({ id }, "WhatsApp enviado");
-      } catch (e) {
-        logger.error(e, "falha ao enviar WhatsApp");
+        try {
+          const id = await sendWA(WA_TO, text);
+          logger.info({ id }, "WhatsApp enviado");
+        } catch (e) {
+          logger.error(e, "falha ao enviar no WhatsApp");
+        }
       }
-    }
 
-    // marca como visto
-    state.seenEmailIds.push(id);
-    state.seenEmailIds = state.seenEmailIds.slice(-200); // limita
-    saveState(state);
+      state.seenIds.push(msgId);
+      state.seenIds = state.seenIds.slice(-500);
+      saveState(state);
+    }
+  } catch (e) {
+    logger.error(e, "erro IMAP");
+  } finally {
+    await connection.end();
   }
 }
 
-// ---------- util / teste ----------
+// ---------- HTTP util ----------
 app.get("/", (_req, res) => res.send("ok"));
 app.get("/test/wa", async (req, res) => {
   try {
@@ -287,12 +219,9 @@ app.get("/test/wa", async (req, res) => {
   }
 });
 
-// ---------- boot ----------
+// ---------- Boot ----------
 (async () => {
   await startWA();
-  // agenda o polling do Gmail
-  cron.schedule(CRON_EXPR, () => {
-    checkGmailOnce().catch(e => logger.error(e, "erro no check Gmail"));
-  });
+  cron.schedule(CRON_EXPR, () => { checkIMAPOnce().catch(e => logger.error(e)); });
   app.listen(PORT, () => logger.info({ PORT }, "up"));
 })();
