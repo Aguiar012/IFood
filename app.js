@@ -242,16 +242,14 @@ async function checkIMAPOnce() {
         );
       }
 
-      if (cls.importance >= IMPORTANCE_THRESHOLD) {
-        const now = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
-      
+      if (cls.importance >= IMPORTANCE_THRESHOLD) {      
         // “email puro” (prioriza texto; se vier só HTML, tira as tags grosseiramente)
         const plain =
           parsed.text ||
           (parsed.html ? parsed.html.replace(/<[^>]+>/g, " ") : "") ||
           "";
       
-        const text = `Mensagem do SUAP agora ${now}:\n\nAssunto: ${subject}\nDe: ${from}\n\n${plain}`.slice(0, 3500);
+        const text = `Mensagem do *SUAP*:\n\n${subject}\n\n${plain}`.slice(0, 3500);
       
         try {
           const id = await sendWA(WA_TO, text);
