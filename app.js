@@ -39,7 +39,7 @@ const EMAIL_USER = process.env.EMAIL_USER;       // conta Gmail do BOT (com 2FA)
 const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD; // App password (16 chars, sem espaços)
 const EMAIL_FILTER_FROM = process.env.EMAIL_FILTER_FROM || "aguiartiago012@gmail.com"; // remetente de teste
 
-const IMPORTANCE_THRESHOLD = Number(process.env.IMPORTANCE_THRESHOLD || "8");
+const IMPORTANCE_THRESHOLD = Number(process.env.IMPORTANCE_THRESHOLD || "6");
 const CRON_EXPR = process.env.POLL_CRON || "*/1 * * * *"; // a cada 1 min
 
 // Estado (arquivo pode ir para volume com STATE_PATH)
