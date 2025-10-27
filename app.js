@@ -4,7 +4,7 @@ import cron from "node-cron";
 import OpenAI from "openai";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
-// SUBSTITUA todo o bloco de import do Baileys por isto:
+
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const baileys = require("@whiskeysockets/baileys");
@@ -196,11 +196,18 @@ async function checkIMAPOnce() {
     logger.warn("IMAP não configurado (EMAIL_USER/EMAIL_APP_PASSWORD).");
     return;
   }
+
+  // 1) Se o WA caiu, não processe IMAP para não “queimar” o e-mail
+  if (!waReady) {
+    logger.warn("WA offline; pulando IMAP para evitar perda de mensagens.");
+    return;
+  }
+
   const connection = await Imap.connect(IMAP_CONFIG);
   try {
     await connection.openBox("INBOX");
     const criteria = ["UNSEEN", ["FROM", EMAIL_FILTER_FROM]];
-    const fetchOptions = { bodies: [""], markSeen: false }; // "" = RFC822
+    const fetchOptions = { bodies: [""], markSeen: false };
 
     const results = await connection.search(criteria, fetchOptions);
     for (const res of results) {
@@ -217,52 +224,46 @@ async function checkIMAPOnce() {
       const body = parsed.text || parsed.html || parsed.textAsHtml || "";
 
       logger.info({ from, subject }, "novo e-mail (IMAP)");
+
       let cls = { importance: 0, reason: "", short_summary: "" };
       try { cls = await classifyImportance(subject, body); }
       catch (e) { logger.error(e, "falha na classificação OpenAI"); }
 
-      // registra a classificação (passando ou não)
-      const record = {
-        ts: new Date().toISOString(),
-        from,
-        subject,
-        importance: cls.importance,
-        reason: cls.reason,
-        summary: cls.short_summary
-      };
-      lastScores.push(record);
-      lastScores = lastScores.slice(-IMPORTANCE_LOG_LIMIT);
-      saveScores(lastScores);
-      
-      // se NÃO passou no limiar, deixa claro no log
-      if (cls.importance < IMPORTANCE_THRESHOLD) {
+      const isImportant = cls.importance >= IMPORTANCE_THRESHOLD;
+      let delivered = false;
+
+      if (isImportant) {
+        const now = new Date().toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" });
+        const plain =
+          parsed.text ||
+          (parsed.html ? parsed.html.replace(/<[^>]+>/g, " ") : "") ||
+          "";
+
+        const text = `Mensagem do SUAP agora ${now}:\n\nAssunto: ${subject}\nDe: ${from}\n\n${plain}`.slice(0, 3500);
+
+        try {
+          const id = await sendWA(WA_TO, text);
+          delivered = true;
+          logger.info({ id }, "WhatsApp enviado");
+        } catch (e) {
+          logger.error(e, "falha ao enviar no WhatsApp");
+          // não marca como visto: deixa para o próximo ciclo
+        }
+      } else {
         logger.info(
           { importance: cls.importance, threshold: IMPORTANCE_THRESHOLD, subject },
           "descartado por importância (< threshold)"
         );
       }
 
-      if (cls.importance >= IMPORTANCE_THRESHOLD) {      
-        // “email puro” (prioriza texto; se vier só HTML, tira as tags grosseiramente)
-        const plain =
-          parsed.text ||
-          (parsed.html ? parsed.html.replace(/<[^>]+>/g, " ") : "") ||
-          "";
-      
-        const text = `Mensagem do *SUAP*:\n\n${subject}\n\n${plain}`.slice(0, 3500);
-      
-        try {
-          const id = await sendWA(WA_TO, text);
-          logger.info({ id }, "WhatsApp enviado");
-        } catch (e) {
-          logger.error(e, "falha ao enviar no WhatsApp");
-        }
+      // 2) Só grava como processado se NÃO importante ou se enviou com sucesso
+      if (!isImportant || delivered) {
+        state.seenIds.push(msgId);
+        state.seenIds = state.seenIds.slice(-500);
+        saveState(state);
+      } else {
+        logger.warn({ msgId, subject }, "importante, mas WA offline/falhou; manteremos para retry");
       }
-
-
-      state.seenIds.push(msgId);
-      state.seenIds = state.seenIds.slice(-500);
-      saveState(state);
     }
   } catch (e) {
     logger.error(e, "erro IMAP");
