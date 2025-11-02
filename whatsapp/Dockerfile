@@ -1,6 +1,8 @@
 FROM node:20-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
+RUN ls -la / && ls -la /app
+
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 make g++ git ca-certificates && rm -rf /var/lib/apt/lists/*
