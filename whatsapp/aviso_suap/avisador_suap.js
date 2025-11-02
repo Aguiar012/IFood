@@ -148,7 +148,7 @@ async function startWA() {
     version,
     auth: state,
     logger,
-    browser: Browsers.macOS("Chrome"),
+    browser: ['IFood Avisos', 'Chrome', '14.4.1'],
     agent,
     fetchAgent: agent,
     markOnlineOnConnect: false,
