@@ -226,7 +226,22 @@ async function checkIMAPOnce() {
   const connection = await Imap.connect(IMAP_CONFIG);
   try {
     await connection.openBox("INBOX");
-    const criteria = ["UNSEEN", ["FROM", EMAIL_FILTER_FROM]];
+
+    // Criteiro é que deve enviar emails recebidos agora ou nos ultimos 3 dias
+    function imapDate(d){
+      const mm = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
+      return `${d.getUTCDate()}-${mm}-${d.getUTCFullYear()}`; // ex: 02-Nov-2025
+    }
+    const days = Number(process.env.IMAP_SINCE_DAYS || "3");
+    const since = new Date(Date.now() - days*864e5);
+    
+    const criteria = [
+      "UNSEEN",
+      ["SINCE", imapDate(since)],
+      ["FROM", EMAIL_FILTER_FROM]
+    ];
+
+    
     const fetchOptions = { bodies: [""], markSeen: false };
 
     const results = await connection.search(criteria, fetchOptions);
