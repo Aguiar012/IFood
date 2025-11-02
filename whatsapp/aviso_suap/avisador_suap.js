@@ -159,22 +159,32 @@ async function startWA() {
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
-    if (qr) {
-      globalThis.__lastQR = qr;
-      console.log("\n=== ESCANEIE ESTE QR NO WHATSAPP ===");
-      qrcode.generate(qr, { small: true });
-      console.log("Dica: GET /qr para ver a imagem grande.\n");
-    }
-    if (connection === "open") { waReady = true; waLastOpen = Date.now(); logger.info("WA conectado"); }
     if (connection === "close") {
       const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
+  
+      // 👇 considere 409/440 e "conflict" como logout/substituída
+      const text = String(lastDisconnect?.error || "");
+      const isConflict =
+        status === 409 || status === 440 ||
+        text.includes("Stream Errored (conflict)") ||
+        text.includes('"conflict"');
+  
+      const shouldReconnect = !isConflict && status !== DisconnectReason.loggedOut;
+  
       waReady = false;
-      const shouldReconnect = status !== DisconnectReason.loggedOut;
-      logger.warn({ status }, "WA desconectado");
-      if (shouldReconnect) setTimeout(safeStartWA, 1500);
-      else logger.error("loggedOut — apague a pasta wa_auth para parear novamente.");
+      logger.warn({ status, isConflict }, "WA desconectado");
+  
+      if (shouldReconnect) {
+        setTimeout(startWA, 1500);
+      } else {
+        logger.error("Sessão substituída / logout — apague a pasta de auth deste bot e repare o QR.");
+        // Opcional (automático): limpar a sessão e reabrir para forçar QR novo
+        // try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
+        // setTimeout(startWA, 1500);
+      }
     }
   });
+
 
   armWaWatchdog(sock);
 
