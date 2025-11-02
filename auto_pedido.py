@@ -1,7 +1,8 @@
 import json, time, logging, random, os, smtplib, requests, re, base64, unicodedata
 from email.message import EmailMessage
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import psycopg
 
 # === Twilio Sandbox (WhatsApp) ===
@@ -26,10 +27,30 @@ TO_ADDRESS   = os.getenv('TO_ADDRESS')
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 
+# Fuso oficial do campus + horário de virada do SICA
+TZ = ZoneInfo('America/Sao_Paulo')
+CUTOFF_HOUR = 13
+CUTOFF_MIN  = 15
+
 logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s',
                     level=logging.INFO)
 
-# === E-mail ===
+# ---------------------- Utilitários de tempo ----------------------
+WEEKDAY_PT = {1:'seg',2:'ter',3:'qua',4:'qui',5:'sex',6:'sab',7:'dom'}
+
+def compute_target_date(now: datetime | None = None):
+    """
+    Retorna a data DO ALMOÇO que o SICA considera no momento atual.
+    - Antes de 13:15 -> D+1
+    - A partir de 13:15 -> D+2
+    """
+    if now is None:
+        now = datetime.now(TZ)
+    cutoff = now.replace(hour=CUTOFF_HOUR, minute=CUTOFF_MIN, second=0, microsecond=0)
+    days_ahead = 1 if now < cutoff else 2
+    return (now + timedelta(days=days_ahead)).date()
+
+# --------------------------- E-mail --------------------------------
 def send_email(subject: str, body: str):
     msg = EmailMessage()
     msg['From'], msg['To'], msg['Subject'] = EMAIL_USER, TO_ADDRESS, subject
@@ -39,7 +60,7 @@ def send_email(subject: str, body: str):
         smtp.login(EMAIL_USER, EMAIL_PASS)
         smtp.send_message(msg)
 
-# === WhatsApp via Twilio Sandbox ===
+# --------------------- WhatsApp via Twilio -------------------------
 def send_whatsapp_text_twilio(to_e164: str, body: str):
     """
     Envia texto via Twilio WhatsApp Sandbox.
@@ -50,10 +71,20 @@ def send_whatsapp_text_twilio(to_e164: str, body: str):
     if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
         logging.warning('TWILIO_* não configurados; alerta WhatsApp suprimido.')
         return
-    to_full = to_e164 if to_e164.startswith('whatsapp:+') else f'whatsapp:{to_e164 if to_e164.startswith("+") else "+"+to_e164}'
-    url = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
+
+    # Normaliza destino: "+55119..." -> "whatsapp:+55119..."
+    to_e164 = (to_e164 or "").strip()
+    if not to_e164:
+        logging.error("Destino vazio para WhatsApp")
+        return
+    if not to_e164.startswith('+'):
+        to_e164 = '+' + to_e164
+    to_full = f'whatsapp:{to_e164}'
+
+    url  = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
     auth = base64.b64encode(f'{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}'.encode()).decode()
     data = {'From': TWILIO_FROM, 'To': to_full, 'Body': body[:1600]}
+
     try:
         r = requests.post(url, data=data, headers={'Authorization': f'Basic {auth}'}, timeout=15)
         if not r.ok:
@@ -61,29 +92,45 @@ def send_whatsapp_text_twilio(to_e164: str, body: str):
     except Exception as e:
         logging.exception('Exceção no envio WhatsApp (Twilio): %s', e)
 
-# === Dados ===
-def load_alunos():
+
+# --------------------------- Dados ---------------------------------
+def load_alunos_para_dia(target_dow: int):
+    """
+    Busca SOMENTE quem almoça no dia-alvo (preferencia_dia.dia_semana = target_dow)
+    e está ativo.
+    """
     if not DATABASE_URL:
         raise RuntimeError("Faltou DATABASE_URL")
-    hoje = datetime.now().isoweekday()
     out = []
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                select a.prontuario
-                from aluno a
-                join preferencia_dia p on p.aluno_id = a.id
-                where a.ativo = true and p.dia_semana = %s
-                order by a.prontuario
-            """, (hoje,))
-            for row in cur.fetchall():
-                (prontuario,) = row
+                select distinct a.prontuario
+                  from aluno a
+                  join preferencia_dia p on p.aluno_id = a.id
+                 where a.ativo = true
+                   and p.dia_semana = %s
+                 order by a.prontuario;
+            """, (target_dow,))
+            for (prontuario,) in cur.fetchall():
                 out.append({'prontuario': prontuario})
     return out
 
+def get_bloqueios_por_prontuario(pront: str) -> list[str]:
+    if not DATABASE_URL:
+        return []
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                select pb.nome
+                  from prato_bloqueado pb
+                  join aluno a on a.id = pb.aluno_id
+                 where a.prontuario = %s
+                 order by pb.nome;
+            """, (pront,))
+            return [r[0] for r in cur.fetchall()]
 
-
-# === HTTP / parsing do site ===
+# --------------------- HTTP / parsing do site ----------------------
 def get_csrf_token(sess):
     resp = sess.get(URL_HOME, timeout=TIMEOUT_SEC)
     resp.raise_for_status()
@@ -122,24 +169,7 @@ def prato_feedback():
         logging.warning('Não foi possível obter prato do dia: %s', e)
         return '(indisponível)'
 
-# === Filtro de erros relevantes ===
-
-IGNORE_PATTERNS = [
-    r'Gerado anteriormente',
-    r'Ticket Gerado',
-    r'PULOU_PREF',                     # <-- NOVO
-    r'Pulou por prefer.ncia',          # <-- NOVO (pegando sem acento)
-]
-
-def is_relevant_error(msg: str) -> bool:
-    if not msg:
-        return False
-    for pat in IGNORE_PATTERNS:
-        if re.search(pat, msg, re.IGNORECASE):
-            return False
-    return True
-  
-# === Verificar no databaset se aluno está ativo ===
+# ----------------- Normalização & preferências ---------------------
 def _norm(txt: str) -> str:
     if not txt:
         return ""
@@ -156,48 +186,57 @@ def should_skip(prato_texto: str, bloqueios: list[str]) -> tuple[bool, str]:
             hits.append(b)
     return (len(hits) > 0, ", ".join(hits))
 
-# === Verificar no databaset se aluno não gosta de pedir algum prato ===
+# ------------------- Erros irrelevantes p/ alerta ------------------
+IGNORE_PATTERNS = [
+    r'Gerado anteriormente',
+    r'Ticket Gerado',
+    r'PULOU_PREF',
+    r'Pulou por prefer.ncia',
+    r'SKIP_DIA',                      # para pulos esperados por dia
+]
 
-def get_bloqueios_por_prontuario(pront: str) -> list[str]:
-    if not DATABASE_URL:
-        return []
-    with psycopg.connect(DATABASE_URL) as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                select pb.nome
-                from prato_bloqueado pb
-                join aluno a on a.id = pb.aluno_id
-                where a.prontuario = %s
-                order by pb.nome
-            """, (pront,))
-            return [r[0] for r in cur.fetchall()]
+def is_relevant_error(msg: str) -> bool:
+    if not msg:
+        return False
+    for pat in IGNORE_PATTERNS:
+        if re.search(pat, msg, re.IGNORECASE):
+            return False
+    return True
 
-
-
-# === Execução principal ===
+# ----------------------- Execução principal ------------------------
 def main():
-    hoje = datetime.now().isoweekday()
+    now = datetime.now(TZ)
+    target_date = compute_target_date(now)
+    target_dow  = target_date.isoweekday()
+
+    logging.info("Janela SICA -> data-alvo: %s (%s)",
+                 target_date.isoformat(), WEEKDAY_PT[target_dow])
+
     detalhes = []
     sess = requests.Session()
 
     prato_do_dia = prato_feedback()
-    logging.info("Prato do dia: %s", prato_do_dia)
+    logging.info("Prato do dia (%s): %s", target_date.isoformat(), prato_do_dia)
 
-    for aluno in load_alunos():
+    # === Somente quem come no dia-alvo ===
+    alunos = load_alunos_para_dia(target_dow)
+
+    for aluno in alunos:
         pront = aluno['prontuario']
-        # Checagem de bloqueios
+
+        # Checagem de bloqueios de prato
         bloqueios = get_bloqueios_por_prontuario(pront)
         skip, hits = should_skip(prato_do_dia, bloqueios)
         if skip:
-            # conta como OK (evita alerta) e registra o motivo
-            inicio = datetime.now().strftime('%H:%M:%S')
+            inicio = datetime.now(TZ).strftime('%H:%M:%S')
             time.sleep(random.randint(0, JITTER_MAX))
-            fim = datetime.now().strftime('%H:%M:%S')
+            fim = datetime.now(TZ).strftime('%H:%M:%S')
             detalhes.append((pront, True, f'PULOU_PREF: {hits}', inicio, fim, 0))
             continue
 
+        # Tentativa de pedido
         time.sleep(random.randint(0, JITTER_MAX))
-        inicio = datetime.now().strftime('%H:%M:%S')
+        inicio = datetime.now(TZ).strftime('%H:%M:%S')
 
         sucesso, mensagem = False, ''
         tentativa = 0
@@ -212,12 +251,12 @@ def main():
                 mensagem = str(e)
                 time.sleep(RETRY_SEC)
 
-        fim = datetime.now().strftime('%H:%M:%S')
+        fim = datetime.now(TZ).strftime('%H:%M:%S')
         detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
 
-
-    # Email de relatório (como antes)
-    linhas = ['Relatório Auto-Almoço — ' + datetime.now().strftime('%d/%m/%Y')]
+    # ----------------- E-mail de relatório -----------------
+    linhas = ['Relatório Auto-Almoço — ' + now.strftime('%d/%m/%Y')]
+    linhas.append(f'Data-alvo: {target_date.strftime("%d/%m/%Y")} ({WEEKDAY_PT[target_dow]})')
     ok_total = sum(1 for _, s, *_ in detalhes if s)
     linhas.append(f'Sucesso: {ok_total}/{len(detalhes)}\n')
     linhas.append('Prontuário | Status | Começou -> Terminou | Tentativas | Mensagem')
@@ -227,15 +266,15 @@ def main():
         linhas.append(f'{pront} | {status} | {ini}→{fim} | {tent} | {msg}')
     send_email('Relatório Auto-Almoço', '\n'.join(linhas))
 
-    # Alerta WhatsApp aos admins (apenas erros relevantes)
+    # -------------- Alerta WhatsApp admins (erros) --------------
     erros = [(p, m) for (p, ok, m, *_ ) in detalhes if (not ok) and is_relevant_error(m)]
     if erros and ADMINS_E164:
         max_linhas = 25
         corpo = []
         corpo.append('Falhas relevantes no Auto-Almoço:')
-        corpo.append(datetime.now().strftime('Data: %d/%m/%Y  Hora: %H:%M:%S'))
+        corpo.append(now.strftime('Data: %d/%m/%Y  Hora: %H:%M:%S'))
         if prato_do_dia not in ('(indisponível)', '(não encontrado)'):
-            corpo.append(f'Prato do dia: {prato_do_dia}')
+            corpo.append(f'Prato do dia ({target_date}): {prato_do_dia}')
         corpo.append('')
         for i, (pront, msg) in enumerate(erros[:max_linhas], start=1):
             corpo.append(f'{i}. {pront}: {msg}')
