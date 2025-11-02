@@ -2,7 +2,7 @@ module.exports = {
   apps: [
     {
       name: "aviso_suap",
-      script: "whatsapp/aviso_suap/aviso_suap.js",
+      script: "whatsapp/aviso_suap/avisador_suap.js",
       env: {
         PORT: "3000",
         WA_AUTH_DIR: "/app/data/wa_auth_suap",
