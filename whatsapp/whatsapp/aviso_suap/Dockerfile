@@ -21,4 +21,4 @@ COPY . .
 
 ENV PORT=3000
 EXPOSE 3000
-CMD ["node","avisador_suap.js"]
+CMD ["node","whatsapp/aviso_suap/avisador_suap.js"]
