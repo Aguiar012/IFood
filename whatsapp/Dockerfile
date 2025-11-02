@@ -9,7 +9,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # package*.json está na RAIZ do repo (build context = /), por isso funciona:
 COPY package*.json ./
-RUN npm ci --omit=dev --no-optional && npm i -g pm2
+
+# instala dependências mesmo sem lockfile e evita conflitos de peer deps
+RUN npm config set legacy-peer-deps true \
+ && npm config set audit false \
+ && npm config set fund false \
+ && if [ -f package-lock.json ]; then \
+      npm ci --omit=dev --no-optional; \
+    else \
+      npm install --omit=dev --no-optional; \
+    fi \
+ && npm i -g pm2@latest
 
 # copie só o que precisa para os dois bots + ecosystem
 COPY whatsapp/aviso_suap ./whatsapp/aviso_suap
