@@ -21,4 +21,4 @@ COPY . .
 
 ENV PORT=3000
 EXPOSE 3000
-CMD ["node","whatsapp/chatbot/bot_do_zap.js"]
+CMD ["node","whatsapp/chatbot/conversa_zap.js]
