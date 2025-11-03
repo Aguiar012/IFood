@@ -14,7 +14,7 @@ apps: [
   },
   {
     name: "zapbot",
-    script: "whatsapp/chatbot/zapbot.js",
+    script: "whatsapp/chatbot/conversa_zap.js",
     env: {
       PORT: 3001,
       DATA_DIR: "/app/data",
