@@ -144,7 +144,7 @@ async function startWA() {
         await sock.sendPresenceUpdate("paused", jid).catch(() => {});
 
         // resposta minimalista
-        await sock.sendMessage(jid, { text: "oi 👋" });
+        await sock.sendMessage(jid, { text: "KKKKKKKKKKKKKKKkk" });
       } catch (e) {
         logger.error(e, "falha no handler de mensagem");
       }
