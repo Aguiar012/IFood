@@ -97,6 +97,19 @@ function canReply(jid, gapMs = 15_000) {
   return true;
 }
 
+let startingWA = false;
+async function safeStartWA () {
+  if (startingWA) return;
+  startingWA = true;
+  try {
+    // garante limpeza do socket anterior, se existir
+    try { sock?.ws?.close(); } catch {}
+    await startWA();
+  } finally {
+    startingWA = false;
+  }
+}
+
 // ---------- WhatsApp ----------
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
@@ -145,7 +158,7 @@ async function startWA() {
       logger.warn({ status, isConflict }, "WA desconectado");
 
       const shouldReconnect = !isConflict && status !== DisconnectReason.loggedOut;
-      if (shouldReconnect) setTimeout(startWA, 1500);
+      if (shouldReconnect) setTimeout(safeStartWA, 1500);
       else logger.error("Sessão substituída/loggedOut — se preciso, apague a pasta de auth deste bot e repare o QR.");
     }
   });
