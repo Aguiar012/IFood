@@ -13,13 +13,13 @@ apps: [
     }
   },
   {
-    name: "zapbot",
+    name: "conversazap",
     script: "whatsapp/chatbot/conversa_zap.js",
     env: {
       PORT: 3001,
       DATA_DIR: "/app/data",
       WA_AUTH_DIR: "/app/data/wa_auth_zapbot",
-      LOCK_FILE: "/app/data/locks/zapbot.lock.json"
+      LOCK_FILE: "/app/data/locks/conversazap.lock.json"
     }
   }
 ]
