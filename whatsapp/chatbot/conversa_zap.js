@@ -34,6 +34,38 @@ app.use(express.json());
 let sock, waReady = false;
 globalThis.__lastQR = "";
 
+const LOCK_FILE = process.env.LOCK_FILE || path.join(DATA_DIR, "locks/conversazap.lock.json");
+fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
+
+function tryAcquireLock() {
+  try {
+    const cur = JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
+    if (Date.now() - (cur.ts || 0) < 5 * 60 * 1000) return false; // 5 min
+  } catch {}
+  fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid }));
+  return true;
+}
+if (!tryAcquireLock()) {
+  console.error("Outra instância ativa usando o mesmo volume. Abortando.");
+  process.exit(1);
+}
+setInterval(() => {
+  try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid })); } catch {}
+}, 60_000);
+
+let waLastOpen = 0;
+let wdTimer = null;
+function armWaWatchdog(){
+  if (wdTimer) return; // garante um único watchdog
+  wdTimer = setInterval(async () => {
+    const stale = Date.now() - waLastOpen > 10 * 60 * 1000; // 10 min
+    if (!waReady || stale) {
+      try { sock?.ws?.close(); } catch {}
+      await safeStartWA(); // ver item 3
+    }
+  }, 60_000);
+}
+
 // ---------- Proxy (igual ao app.js) ----------
 async function buildProxyAgent(url) {
   if (!url) return undefined;
@@ -84,6 +116,8 @@ async function startWA() {
     syncFullHistory: false
   });
 
+  armWaWatchdog(sock);
+
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
@@ -95,6 +129,7 @@ async function startWA() {
     }
     if (connection === "open") {
       waReady = true;
+      waLastOpen = Date.now();
       logger.info({ WA_AUTH_DIR, PORT }, "WA conectado");
     }
     if (connection === "close") {
@@ -209,6 +244,7 @@ app.get("/test/wa", async (req, res) => {
 
 // ---------- Boot ----------
 (async () => {
-  await startWA();
+  armWaWatchdog();
+  await safeStartWA();
   app.listen(PORT, () => logger.info({ PORT, WA_AUTH_DIR }, "ZapBot up"));
 })();
