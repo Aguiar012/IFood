@@ -3,6 +3,7 @@ apps: [
   {
     name: "aviso_suap",
     script: "whatsapp/aviso_suap/avisador_suap.js",
+    autorestart: false,
     env: {
       PORT: 3000,
       DATA_DIR: "/app/data",
@@ -15,6 +16,7 @@ apps: [
   {
     name: "conversazap",
     script: "whatsapp/chatbot/conversa_zap.js",
+    autorestart: false,
     env: {
       PORT: 3001,
       DATA_DIR: "/app/data",
