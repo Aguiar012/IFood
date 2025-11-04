@@ -1,3 +1,5 @@
+
+
 // whatsapp/chatbot/conversa_zap.js
 import express from "express";
 import P from "pino";
@@ -18,6 +20,8 @@ const {
   Browsers
 } = baileys;
 
+import { createConversaFlow } from "./conversa_flow.js";
+
 // ---------- ENV ----------
 const PORT = Number(process.env.PORT || 3001);
 const PROXY_URL = process.env.PROXY_URL || ""; // ex: http://USER:PASS@HOST:PORT
@@ -31,6 +35,13 @@ fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
 const logger = P({ level: "info" });
 const app = express();
 app.use(express.json());
+
+// --- Flow de conversa ---
+const flow = createConversaFlow({
+  dataDir: DATA_DIR,
+  dbUrl: process.env.DATABASE_URL, // defina no deploy (.env)
+  logger
+});
 
 // ---------- ESTADO GLOBAL ----------
 let sock;
@@ -258,22 +269,27 @@ async function startWA() {
         const jid = m.key?.remoteJid || "";
         if (fromMe) continue;
         if (!jid || jid.endsWith("@status")) continue;
-
+  
         const msg =
           m.message?.conversation ||
           m.message?.extendedTextMessage?.text ||
           m.message?.imageMessage?.caption ||
           m.message?.videoMessage?.caption ||
           "";
-
+  
         if (!msg) continue;
         if (!canReply(jid)) continue;
-
+  
         await sock.presenceSubscribe(jid).catch(() => {});
         await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-        await sleep(800 + Math.floor(Math.random() * 700));
+        await sleep(600 + Math.floor(Math.random() * 600));
         await sock.sendPresenceUpdate("paused", jid).catch(() => {});
-        await sock.sendMessage(jid, { text: "KKKKKKKKKKKKKKKkk" });
+  
+        // <<< chama o motor de conversa >>>
+        const reply = await flow.handleText(jid, msg);
+        if (reply) {
+          await sock.sendMessage(jid, { text: reply });
+        }
       } catch (e) {
         logger.error(e, "falha no handler de mensagem");
       }
