@@ -22,8 +22,24 @@ import https from "https";
 import Imap from "imap-simple";
 import { simpleParser } from "mailparser";
 
+import paths from "./whatsapp/paths.js";
+import { createConversaFlow } from "./whatsapp/chatbot/conversa_flow.js";
+
+
+const WA_AUTH_DIR = paths.WA_AUTH_DIR;
+
+const { handleText } = createConversaFlow({
+  dataDir: paths.DATA_DIR,          // <-- antes era /app/data (global); agora é /app/data/conversazap
+  dbUrl: process.env.DATABASE_URL,
+  logger: console,
+});
+
+// Porta sem secrets (auto): conversazap -> 3001, aviso_suap -> 3000
+const PORT = Number(process.env.PORT)
+  || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
+
 // ---------- ENV ----------
-const PORT = process.env.PORT || 3000;
+
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const WA_TO = process.env.WA_TO || "";           // 55119... ou ...@g.us
 const PROXY_URL = process.env.PROXY_URL || "";   // http://USER:PASS@HOST:PORT
