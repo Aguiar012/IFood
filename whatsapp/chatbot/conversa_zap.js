@@ -1,3 +1,4 @@
+// whatsapp/chatbot/conversa_zap.js
 import express from "express";
 import P from "pino";
 import { Boom } from "@hapi/boom";
@@ -7,15 +8,15 @@ import https from "https";
 import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const baileys = require("@whiskeysockets/baileys");
-const WS = require("ws"); // para /debug/ws-check
+const WS = require("ws");
 
 const { useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, Browsers } = baileys;
 
 // ---------- ENV ----------
 const PORT = Number(process.env.PORT || 3001);
-const PROXY_URL = process.env.PROXY_URL || ""; // http://USER:PASS@HOST:PORT
+const PROXY_URL_RAW = process.env.PROXY_URL || ""; // http://USER:PASS@HOST:PORT
 
-// >>> PERSISTÊNCIA NO VOLUME /app/data (PASTA SEPARADA DO OUTRO BOT!) <<<
+// >>> PERSISTÊNCIA (cada bot com sua própria pasta) <<<
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = process.env.WA_AUTH_DIR || path.join(DATA_DIR, "wa_auth_zapbot");
 fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
@@ -33,36 +34,54 @@ let wdTimer = null;
 let startingWA = false;
 globalThis.__lastQR = "";
 
-// ---------- LOCK (HOST+PID+TTL) ----------
+// ---------- LOCK (ISOLADO POR BOT, SEM COLIDIR COM OUTROS APPS) ----------
 const HOST = process.env.HOSTNAME || "local";
-const LOCK_FILE = process.env.LOCK_FILE || path.join(DATA_DIR, "locks/conversazap.lock.json");
+const LOCK_FILE = path.join(WA_AUTH_DIR, ".lock.json"); // <- mudou daqui
 fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
 
 function readLock() { try { return JSON.parse(fs.readFileSync(LOCK_FILE, "utf8")); } catch { return null; } }
 function writeLock() { try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })); } catch {} }
-function isPidAlive(pid){ try{ process.kill(pid,0); return true;}catch{ return false; } }
+function isPidAlive(pid){ try{ process.kill(pid,0); return true; } catch { return false; } }
 function tryAcquireLock(){
-  const cur = readLock(); const now = Date.now(); const TTL = 90_000;
+  const cur = readLock(); const now = Date.now(); const TTL = Number(process.env.LOCK_TTL_MS || 90_000);
+  const STEAL = process.env.FORCE_LOCK_STEAL === "1";
   if (cur){
-    const sameHost = cur.host === HOST, fresh = now - (cur.ts||0) < TTL, alive = sameHost && cur.pid && isPidAlive(cur.pid);
+    const sameHost = cur.host === HOST;
+    const fresh = now - (cur.ts || 0) < TTL;
+    const alive = sameHost && cur.pid && isPidAlive(cur.pid);
     if (sameHost && !alive) { writeLock(); return true; }
-    if (!sameHost && fresh) { console.error("Outra instância ativa no mesmo volume. Abortando."); process.exit(1); }
+    if (!sameHost && fresh && !STEAL) {
+      console.error("Outra instância ativa usando o mesmo auth-dir. Abortando.");
+      process.exit(1);
+    }
   }
   writeLock(); return true;
 }
-if (!tryAcquireLock()){ console.error("Falha ao adquirir lock."); process.exit(1); }
+if (!tryAcquireLock()) { console.error("Falha ao adquirir lock."); process.exit(1); }
 setInterval(writeLock, 30_000);
-for (const ev of ["SIGINT","SIGTERM","beforeExit","exit"]) process.on(ev, () => { try {
-  const cur = readLock(); if (cur && cur.host===HOST && cur.pid===process.pid) fs.unlinkSync(LOCK_FILE);
-} catch {} });
+for (const ev of ["SIGINT","SIGTERM","beforeExit","exit"]) {
+  process.on(ev, () => { try {
+    const cur = readLock(); if (cur && cur.host===HOST && cur.pid===process.pid) fs.unlinkSync(LOCK_FILE);
+  } catch {} });
+}
 
 // ---------- Proxy ----------
-let _proxyAgent;
-async function buildProxyAgent(url) {
-  if (!url) return undefined;
+function normalizeProxyUrl(u){
+  if (!u) return "";
+  let s = u.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) s = s.slice(1, -1);
+  if (!/^https?:\/\//i.test(s)) s = "http://" + s; // garante esquema
+  // valida
+  try { new URL(s); } catch (e) { throw new Error("PROXY_URL inválida: " + e.message); }
+  return s;
+}
+const PROXY_URL = PROXY_URL_RAW ? normalizeProxyUrl(PROXY_URL_RAW) : "";
+
+let _httpProxyAgent; // única declaração
+async function buildProxyAgent() {
+  if (!PROXY_URL) return undefined;
   const { HttpsProxyAgent } = await import("https-proxy-agent");
-  // >>> AQUI O FIX: passe a URL diretamente (string/URL), NADA de { uri: ... }
-  return new HttpsProxyAgent(url);
+  return new HttpsProxyAgent(PROXY_URL); // recebe string/URL válida
 }
 function maskProxy(url){
   try{
@@ -74,19 +93,24 @@ function maskProxy(url){
 }
 
 // ---------- Utils ----------
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms)=> new Promise(r=>setTimeout(r,ms));
 function toJid(to){ if (to.endsWith("@s.whatsapp.net") || to.endsWith("@g.us")) return to; return `${to.replace(/\D/g,"")}@s.whatsapp.net`; }
-async function sendWA(to,text){ if(!waReady) throw new Error("WhatsApp não conectado"); const jid = toJid(to); const sent = await sock.sendMessage(jid,{ text }); return sent?.key?.id; }
+async function sendWA(to, text){ if(!waReady) throw new Error("WhatsApp não conectado"); const jid=toJid(to); const sent=await sock.sendMessage(jid,{ text }); return sent?.key?.id; }
 const lastReplyAt = new Map();
-function canReply(jid, gap=15_000){ const now=Date.now(), last=lastReplyAt.get(jid)||0; if(now-last<gap) return false; lastReplyAt.set(jid,now); return true; }
+function canReply(jid, gap=15_000){ const now=Date.now(), last=lastReplyAt.get(jid)||0; if(now-last<gap) return false; lastReplyAt.set(jid, now); return true; }
 
 // ---------- Watchdog ----------
 function armWaWatchdog(){
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
     const stale = Date.now() - waLastOpen > 4*60*1000;
-    if (stale || !waReady) { logger.warn({ waReady, stale }, "WA watchdog: restarting socket"); try{ sock?.ws?.close(); }catch{} await safeStartWA(); }
-    else { try{ sock?.ws?.ping?.(); }catch{} }
+    if (stale || !waReady) {
+      logger.warn({ waReady, stale }, "WA watchdog: restarting socket");
+      try{ sock?.ws?.close(); }catch{}
+      await safeStartWA();
+    } else {
+      try{ sock?.ws?.ping?.(); }catch{}
+    }
   }, 60_000);
 }
 
@@ -104,7 +128,7 @@ async function startWA(){
   const { version } = await fetchLatestBaileysVersion();
   logger.info({ version }, "Baileys version");
 
-  const agent = await buildProxyAgent(PROXY_URL);
+  const agent = await buildProxyAgent();
   if (PROXY_URL) logger.info({ proxy: maskProxy(PROXY_URL) }, "Usando proxy para HTTPS e WSS");
   else logger.warn("PROXY_URL não definido — tráfego sairá direto");
 
@@ -113,7 +137,7 @@ async function startWA(){
     auth: state,
     logger,
     browser: Browsers.macOS("Chrome"),
-    agent,       // WSS
+    agent,        // WSS
     fetchAgent: agent, // HTTPS
     markOnlineOnConnect: false,
     syncFullHistory: false,
@@ -123,18 +147,18 @@ async function startWA(){
 
   sock.ev.on("creds.update", saveCreds);
 
-  // backoff + circuit breaker pra 428
   let reconnectDelay = 1500;
   const MAX_DELAY = 60_000;
   let err428Count = 0;
   const MAX_428 = 3;
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
-    if (qr){ globalThis.__lastQR = qr; logger.info("QR atualizado — abra /qr (auto-refresh)"); }
+    if (qr){ globalThis.__lastQR = qr; logger.info("QR atualizado — abra /qr"); }
 
     if (connection === "open"){
       waReady = true; waLastOpen = Date.now(); reconnectDelay = 1500; err428Count = 0;
-      logger.info({ WA_AUTH_DIR, PORT }, "WA conectado"); return;
+      logger.info({ WA_AUTH_DIR, PORT }, "WA conectado");
+      return;
     }
 
     if (connection === "close"){
@@ -156,8 +180,8 @@ async function startWA(){
       logger.warn({ status, isConflict, err428Count }, "WA desconectado");
 
       if (err428Count >= MAX_428){
-        logger.warn("Muitos 428 seguidos — pausando reconexão por 5 minutos (provável bloqueio da proxy para WSS).");
-        setTimeout(() => { err428Count = 0; safeStartWA(); }, 5*60_000);
+        logger.warn("Muitos 428 seguidos — pausando reconexão por 5 minutos (verifique WSS na proxy).");
+        setTimeout(()=>{ err428Count = 0; safeStartWA(); }, 5*60_000);
         return;
       }
       if (!isConflict){
@@ -217,12 +241,15 @@ app.get("/qr", (_req,res)=>{
 </script>`);
 });
 
-// Confirma IP via proxy (HTTP)
-let _proxyAgent;
-async function getProxyAgent(){ if (_proxyAgent!==undefined) return _proxyAgent; _proxyAgent = await buildProxyAgent(PROXY_URL); return _proxyAgent; }
+// Debug proxy IP (HTTP)
+async function getHttpProxyAgent(){
+  if (_httpProxyAgent !== undefined) return _httpProxyAgent;
+  _httpProxyAgent = PROXY_URL ? await (async()=>{ const { HttpsProxyAgent } = await import("https-proxy-agent"); return new HttpsProxyAgent(PROXY_URL); })() : undefined;
+  return _httpProxyAgent;
+}
 app.get("/debug/proxy-ip", async (_req,res)=>{
   try{
-    const agent = await getProxyAgent();
+    const agent = await getHttpProxyAgent();
     const req = https.request({ host:"api.ipify.org", path:"/?format=json", agent }, r=>{
       let data=""; r.on("data",d=>data+=d); r.on("end", ()=>res.type("json").send(data));
     });
@@ -230,10 +257,10 @@ app.get("/debug/proxy-ip", async (_req,res)=>{
   }catch(e){ res.status(500).send(String(e)); }
 });
 
-// Testa WEBSOCKET pela proxy (tem que funcionar pro WhatsApp)
+// Debug WSS via proxy
 app.get("/debug/ws-check", async (_req,res)=>{
   try{
-    const agent = await getProxyAgent();
+    const agent = await getHttpProxyAgent();
     await new Promise((resolve, reject)=>{
       const ws = new WS("wss://echo.websocket.events", { agent, handshakeTimeout: 8000 });
       const timer = setTimeout(()=>{ try{ ws.terminate(); }catch{}; reject(new Error("timeout")); }, 9000);
