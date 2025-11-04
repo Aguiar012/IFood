@@ -21,7 +21,7 @@ const {
   getContentType
 } = baileys;
 
-import paths from "./config/paths.js";
+import paths from "./whatsapp/paths.js";
 import { createConversaFlow } from "./whatsapp/chatbot/conversa_flow.js";
 
 
