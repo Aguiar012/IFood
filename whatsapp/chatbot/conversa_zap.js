@@ -21,7 +21,7 @@ const {
   getContentType
 } = baileys;
 
-import paths from "./whatsapp/paths.js";
+import paths from "../paths.js";
 import { createConversaFlow } from "./whatsapp/chatbot/conversa_flow.js";
 
 
@@ -64,9 +64,7 @@ globalThis.__lastQR = "";
 let err428Count = 0;
 
 /* ===================== LOCK (HOST+PID+TTL) ===================== */
-const HOST = process.env.HOSTNAME || "local";
-const LOCK_FILE = process.env.LOCK_FILE || path.join(DATA_DIR, "locks/conversazap.lock.json");
-fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
+
 
 function readLock() { try { return JSON.parse(fs.readFileSync(LOCK_FILE, "utf8")); } catch { return null; } }
 function writeLock() { try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })); } catch {} }
