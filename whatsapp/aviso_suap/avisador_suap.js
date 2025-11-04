@@ -22,7 +22,8 @@ import https from "https";
 import Imap from "imap-simple";
 import { simpleParser } from "mailparser";
 
-import paths from "../../paths.js";
+import paths from "../paths.js";
+
 import { createConversaFlow } from "./whatsapp/chatbot/conversa_flow.js";
 
 
