@@ -21,10 +21,23 @@ const {
   getContentType
 } = baileys;
 
-import { createConversaFlow } from "./conversa_flow.js";
+import paths from "./config/paths.js";
+import { createConversaFlow } from "./whatsapp/chatbot/conversa_flow.js";
+
+
+const WA_AUTH_DIR = paths.WA_AUTH_DIR;
+
+const { handleText } = createConversaFlow({
+  dataDir: paths.DATA_DIR,          // <-- antes era /app/data (global); agora é /app/data/conversazap
+  dbUrl: process.env.DATABASE_URL,
+  logger: console,
+});
+
+// Porta sem secrets (auto): conversazap -> 3001, aviso_suap -> 3000
+const PORT = Number(process.env.PORT)
+  || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 
 /* ===================== ENV ===================== */
-const PORT = Number(process.env.PORT || 3001);
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = process.env.WA_AUTH_DIR || path.join(DATA_DIR, "wa_auth_zapbot");
