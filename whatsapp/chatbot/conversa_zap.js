@@ -10,37 +10,39 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 const baileys = require("@whiskeysockets/baileys");
 import WebSocket from "ws";
-import { createConversaFlow } from "./conversa_flow.js";
 
 const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   DisconnectReason,
-  Browsers
+  Browsers,
+  extractMessageContent,
+  jidNormalizedUser,
+  getContentType
 } = baileys;
 
-// ---------- ENV ----------
-const PORT = Number(process.env.PORT || 3001);
-const PROXY_URL = process.env.PROXY_URL || ""; // ex: http://USER:PASS@HOST:PORT
+import { createConversaFlow } from "./conversa_flow.js";
 
-// >>> PERSISTÊNCIA NO VOLUME /app/data <<<
+/* ===================== ENV ===================== */
+const PORT = Number(process.env.PORT || 3001);
+const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = process.env.WA_AUTH_DIR || path.join(DATA_DIR, "wa_auth_zapbot");
 fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
 
-// ---------- LOG + HTTP ----------
-const logger = P({ level: "info" });
+/* ===================== LOG + HTTP ===================== */
+const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 app.use(express.json());
 
-// --- Flow de conversa ---
+/* ===================== FLOW ===================== */
 const flow = createConversaFlow({
   dataDir: DATA_DIR,
-  dbUrl: process.env.DATABASE_URL, // defina no deploy (.env)
+  dbUrl: process.env.DATABASE_URL,
   logger
 });
 
-// ---------- ESTADO GLOBAL ----------
+/* ===================== ESTADO GLOBAL ===================== */
 let sock;
 let waReady = false;
 let waLastOpen = 0;
@@ -49,24 +51,16 @@ let startingWA = false;
 globalThis.__lastQR = "";
 let err428Count = 0;
 
-// ---------- LOCK (HOST+PID+TTL) ----------
+/* ===================== LOCK (HOST+PID+TTL) ===================== */
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = process.env.LOCK_FILE || path.join(DATA_DIR, "locks/conversazap.lock.json");
 fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
 
-function readLock() {
-  try { return JSON.parse(fs.readFileSync(LOCK_FILE, "utf8")); } catch { return null; }
-}
-function writeLock() {
-  try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })); } catch {}
-}
-function isPidAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
+function readLock() { try { return JSON.parse(fs.readFileSync(LOCK_FILE, "utf8")); } catch { return null; } }
+function writeLock() { try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })); } catch {} }
+function isPidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
 function tryAcquireLock() {
-  const cur = readLock();
-  const now = Date.now();
-  const TTL = 90_000;
+  const cur = readLock(); const now = Date.now(); const TTL = 90_000;
   if (cur) {
     const sameHost = cur.host === HOST;
     const fresh = now - (cur.ts || 0) < TTL;
@@ -77,34 +71,30 @@ function tryAcquireLock() {
       process.exit(1);
     }
   }
-  writeLock();
-  return true;
+  writeLock(); return true;
 }
-if (!tryAcquireLock()) {
-  console.error("Falha ao adquirir lock. Abortando.");
-  process.exit(1);
-}
+if (!tryAcquireLock()) { console.error("Falha ao adquirir lock. Abortando."); process.exit(1); }
 setInterval(writeLock, 30_000);
 
-// ---------- Proxy helpers ----------
-let _proxyAgentSingleton;
-let proxyCooldownUntil = 0; // epoch ms: durantre este período NÃO usa proxy
+/* limpar lock ao sair */
+for (const ev of ["SIGINT", "SIGTERM", "beforeExit", "exit"]) {
+  process.on(ev, () => {
+    try {
+      const cur = readLock();
+      if (cur && cur.host === HOST && cur.pid === process.pid) fs.unlinkSync(LOCK_FILE);
+    } catch {}
+  });
+}
 
-async function getProxyAgent() {
-  if (!PROXY_URL) return undefined;
-  if (_proxyAgentSingleton) return _proxyAgentSingleton;
+/* ===================== Proxy ===================== */
+let __proxyAgent;
+async function buildProxyAgent(url) {
+  if (!url) return undefined;
+  if (__proxyAgent) return __proxyAgent;
   const { HttpsProxyAgent } = await import("https-proxy-agent");
-  _proxyAgentSingleton = new HttpsProxyAgent(PROXY_URL);
-  logger.info({ proxy: maskProxy(PROXY_URL) }, "Usando proxy para HTTPS e WSS");
-  return _proxyAgentSingleton;
-}
-function shouldUseProxy() {
-  return !!PROXY_URL && Date.now() > proxyCooldownUntil;
-}
-function cooldownProxy(ms = 10 * 60 * 1000) {
-  if (!PROXY_URL) return;
-  proxyCooldownUntil = Date.now() + ms;
-  logger.warn({ until: new Date(proxyCooldownUntil).toISOString() }, "Proxy em cooldown — discando direto sem proxy");
+  __proxyAgent = new HttpsProxyAgent(url);
+  logger.info({ proxy: maskProxy(url) }, "Usando proxy para HTTPS e WSS");
+  return __proxyAgent;
 }
 function maskProxy(u) {
   try {
@@ -115,7 +105,7 @@ function maskProxy(u) {
   } catch { return "****"; }
 }
 
-// ---------- Utils ----------
+/* ===================== Utils ===================== */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function toJid(to) {
   if (!to) throw new Error("destinatário vazio");
@@ -129,30 +119,7 @@ async function sendWA(to, text) {
   return sent?.key?.id;
 }
 
-// anti-spam simples
-const lastReplyAt = new Map();
-function canReply(jid, gapMs = 15000) {
-  const now = Date.now();
-  const last = lastReplyAt.get(jid) || 0;
-  if (now - last < gapMs) return false;
-  lastReplyAt.set(jid, now);
-  return true;
-}
-
-function extractText(m) {
-  const msg = m?.message || {};
-  // unwrap ephemeral
-  const inner = msg.ephemeralMessage?.message || msg.viewOnceMessageV2?.message || msg;
-  return (
-    inner.conversation ||
-    inner.extendedTextMessage?.text ||
-    inner.imageMessage?.caption ||
-    inner.videoMessage?.caption ||
-    ""
-  );
-}
-
-// ---------- Watchdog ----------
+/* ===================== Watchdog ===================== */
 function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
@@ -167,7 +134,19 @@ function armWaWatchdog() {
   }, 60_000);
 }
 
-// ---------- Start seguro ----------
+/* ===================== SaveCreds hooks (uma vez só) ===================== */
+let _saveCredsRef = async () => {};
+let _sigHooked = false;
+function registerSaveCreds(fn) {
+  _saveCredsRef = fn;
+  if (_sigHooked) return;
+  _sigHooked = true;
+  for (const sig of ["SIGINT", "SIGTERM"]) {
+    process.on(sig, async () => { try { await _saveCredsRef(); } catch {} });
+  }
+}
+
+/* ===================== Start seguro ===================== */
 async function safeStartWA() {
   if (startingWA) return;
   startingWA = true;
@@ -179,38 +158,35 @@ async function safeStartWA() {
   }
 }
 
-// ---------- WhatsApp ----------
+/* ===================== WhatsApp ===================== */
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
+  registerSaveCreds(saveCreds);
+
   const { version } = await fetchLatestBaileysVersion();
   logger.info({ version }, "Baileys version");
-
-  const agent = shouldUseProxy() ? await getProxyAgent() : undefined;
-
+  const agent = await buildProxyAgent(PROXY_URL);
   const browser = Browsers.macOS("Chrome");
 
   sock = baileys.makeWASocket({
     version,
     auth: state,
     logger,
-    browser,            // fingerprint padrão do Baileys
-    agent,              // WebSocket via proxy (CONNECT) se habilitado
-    fetchAgent: agent,  // fetch/HTTP via proxy se habilitado
+    browser,
+    agent,              // WebSocket via proxy
+    fetchAgent: agent,  // HTTP via proxy (media, check-ins)
     markOnlineOnConnect: false,
-    syncFullHistory: false, // manter como antes (rápido e econômico)
+    syncFullHistory: false,
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false
   });
 
-  // Salva credenciais quando atualizam
   sock.ev.on("creds.update", saveCreds);
 
-  // Backoff de reconexão
   let reconnectDelay = 1500;
   const MAX_DELAY = 60_000;
 
-  // Atualiza status de conexão + QR
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) {
       globalThis.__lastQR = qr;
@@ -230,12 +206,6 @@ async function startWA() {
     if (connection === "close") {
       const err = lastDisconnect?.error;
       const status = new Boom(err)?.output?.statusCode;
-      const text = String(err || "");
-
-      // Se erro típico de proxy, liga cooldown (tenta sem proxy na próxima)
-      if (/Proxy connection ended|socket hang up/i.test(text)) {
-        cooldownProxy(10 * 60 * 1000);
-      }
 
       if (status === DisconnectReason.loggedOut) {
         try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
@@ -246,7 +216,6 @@ async function startWA() {
         return;
       }
 
-      // 428 → segura loop (economiza MB)
       if (status === 428) {
         err428Count++;
         logger.warn({ status, err428Count }, "WA desconectado (428)");
@@ -260,7 +229,6 @@ async function startWA() {
         return;
       }
 
-      // outras quedas: reconectar com backoff exponencial
       waReady = false;
       logger.warn({ status }, "WA desconectado");
       setTimeout(safeStartWA, reconnectDelay);
@@ -268,58 +236,76 @@ async function startWA() {
     }
   });
 
-  // Responder mensagens
+  /* ===== Inbound messages ===== */
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
-    if (type !== "notify") return;
-    for (const m of messages) {
-      try {
+    try {
+      if (!messages?.length) return;
+      for (const m of messages) {
         const fromMe = !!m.key?.fromMe;
-        const jid = m.key?.remoteJid || "";
-        if (fromMe) continue;
+        let jid = m.key?.remoteJid || "";
         if (!jid || jid.endsWith("@status")) continue;
 
-        const msg = extractText(m);
-        if (!msg) continue;
-        if (!canReply(jid)) continue;
+        // normaliza (remove device suffix / lid forms)
+        jid = jidNormalizedUser(jid);
 
-        await sock.presenceSubscribe(jid).catch(() => {});
-        await sock.sendPresenceUpdate("composing", jid).catch(() => {});
-        await sleep(600 + Math.floor(Math.random() * 600));
-        await sock.sendPresenceUpdate("paused", jid).catch(() => {});
+        // log bruto
+        const ct = getContentType(m.message);
+        logger.info({ type, fromMe, jid, ct }, "RX upsert");
 
-        const reply = await flow.handleText(jid, msg).catch(e => {
-          logger.error(e, "flow.handleText falhou");
-          return "Desculpa, tive um problema aqui. Pode repetir?";
-        });
+        // só responda outros (se quiser ecoar seus próprios, troque aqui)
+        if (fromMe) continue;
 
-        if (reply) {
-          await sock.sendMessage(jid, { text: reply });
+        // extrai texto de forma robusta
+        const content = extractMessageContent(m.message) || {};
+        const text =
+          content.conversation ||
+          content.extendedTextMessage?.text ||
+          content.imageMessage?.caption ||
+          content.videoMessage?.caption ||
+          content.buttonsResponseMessage?.selectedButtonId ||
+          content.listResponseMessage?.singleSelectReply?.selectedRowId ||
+          content.templateButtonReplyMessage?.selectedId ||
+          "";
+
+        if (!text) {
+          logger.info({ jid }, "Sem texto extraído — ignorando.");
+          continue;
         }
-      } catch (e) {
-        logger.error(e, "falha no handler de mensagem");
+
+        // marca como lido + presença
+        try { await sock.readMessages([m.key]); } catch {}
+        try {
+          await sock.presenceSubscribe(jid);
+          await sock.sendPresenceUpdate("composing", jid);
+          await sleep(400 + Math.floor(Math.random() * 400));
+          await sock.sendPresenceUpdate("paused", jid);
+        } catch {}
+
+        // chama o motor de conversa
+        let reply = "";
+        try {
+          reply = await flow.handleText(jid, text);
+        } catch (e) {
+          logger.error({ err: String(e) }, "flow.handleText falhou");
+          reply = "Desculpa, falhei aqui. Tenta de novo em instantes.";
+        }
+
+        // fallback de teste
+        if (!reply) reply = "ok";
+
+        await sock.sendMessage(jid, { text: reply });
+        logger.info({ jid, reply }, "TX reply");
       }
+    } catch (e) {
+      logger.error(e, "falha no handler de mensagem");
     }
   });
 }
 
-// ---------- Sinais do processo (registre UMA vez) ----------
-process.setMaxListeners?.(50);
-for (const sig of ["SIGINT", "SIGTERM"]) {
-  process.on(sig, () => {
-    try {
-      // não chamar saveCreds aqui (está no evento 'creds.update'); apenas limpar lock
-      const cur = readLock();
-      if (cur && cur.host === HOST && cur.pid === process.pid) fs.unlinkSync(LOCK_FILE);
-    } catch {}
-    process.exit(0);
-  });
-}
-
-// ---------- HTTP util ----------
+/* ===================== HTTP util ===================== */
 app.get("/", (_req, res) => res.send("ok"));
-app.get("/health", (_req, res) => res.json({ waReady, proxyEnabled: shouldUseProxy() }));
+app.get("/health", (_req, res) => res.json({ waReady, ts: Date.now() }));
 
-// QR grande no navegador
 app.get("/qr", (_req, res) => {
   const qr = globalThis.__lastQR || "";
   if (!qr) return res.status(404).send("QR ainda não gerado. Aguarde reconexão.");
@@ -337,9 +323,17 @@ app.get("/qr", (_req, res) => {
 });
 
 // /debug/proxy-ip
+let _proxyAgentSingleton;
+async function getProxyAgent() {
+  if (_proxyAgentSingleton) return _proxyAgentSingleton;
+  if (!PROXY_URL) return undefined;
+  const { HttpsProxyAgent } = await import("https-proxy-agent");
+  _proxyAgentSingleton = new HttpsProxyAgent(PROXY_URL);
+  return _proxyAgentSingleton;
+}
 app.get("/debug/proxy-ip", async (_req, res) => {
   try {
-    const agent = shouldUseProxy() ? await getProxyAgent() : undefined;
+    const agent = await getProxyAgent();
     const req = https.request({ host: "api.ipify.org", path: "/?format=json", agent }, r => {
       let data=""; r.on("data", d => data+=d); r.on("end", () => res.type("json").send(data));
     });
@@ -349,31 +343,23 @@ app.get("/debug/proxy-ip", async (_req, res) => {
 });
 
 // /debug/ws — testa WebSocket via o MESMO proxy
-app.get("/debug/ws", async (req, res) => {
+app.get("/debug/ws", async (_req, res) => {
   try {
-    const target = req.query.url || "wss://echo.websocket.events/";
-    const agent = shouldUseProxy() ? await getProxyAgent() : undefined;
+    const agent = await getProxyAgent();
     const t0 = Date.now();
-    const ws = new WebSocket(target, { agent, handshakeTimeout: 10000 });
+    const ws = new WebSocket("wss://echo.websocket.events/", { agent, handshakeTimeout: 10000 });
     let done = false;
-
     ws.on("open", () => ws.send("ping"));
     ws.on("message", () => {
-      if (done) return;
-      done = true;
-      ws.close();
-      res.json({ ok: true, viaProxy: !!agent, rttMs: Date.now()-t0, target });
+      if (done) return; done = true; ws.close();
+      res.json({ ok: true, viaProxy: !!agent, rttMs: Date.now()-t0 });
     });
     ws.on("error", (e) => {
-      if (done) return;
-      done = true;
-      res.status(500).json({ ok: false, error: String(e), target, viaProxy: !!agent });
+      if (done) return; done = true; res.status(500).json({ ok: false, error: String(e) });
     });
     setTimeout(() => {
-      if (done) return;
-      done = true;
-      try { ws.terminate(); } catch {}
-      res.status(504).json({ ok: false, error: "timeout", target, viaProxy: !!agent });
+      if (done) return; done = true; try { ws.terminate(); } catch {}
+      res.status(504).json({ ok: false, error: "timeout" });
     }, 12000);
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
@@ -390,7 +376,7 @@ app.get("/test/wa", async (req, res) => {
   }
 });
 
-// ---------- Boot ----------
+/* ===================== Boot ===================== */
 (async () => {
   tryAcquireLock(); // revalida ao subir
   armWaWatchdog();
