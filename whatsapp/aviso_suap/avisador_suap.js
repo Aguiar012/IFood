@@ -361,4 +361,97 @@ async function checkIMAPOnce() {
 
 // QR só faz sentido quando este app mantém a sessão WA
 app.get("/qr", (_req, res) => {
-  if (FORWARD_WA_HTTP) return res.status(404).send("QR indispon
+  if (FORWARD_WA_HTTP) return res.status(404).send("QR indisponível: esta instância encaminha via FORWARD_WA_HTTP.");
+  const qr = globalThis.__lastQR || "";
+  if (!qr) return res.status(404).send("QR ainda não gerado. Aguarde reconexão.");
+  res.set("content-type","text/html");
+  res.end(`<!doctype html>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>WhatsApp QR</title>
+<style>body{margin:0;display:grid;place-items:center;height:100vh;background:#fff}</style>
+<div id="qrcode"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+  new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(globalThis.__lastQR||"")}, width: 360, height: 360, correctLevel: QRCode.CorrectLevel.M });
+  setTimeout(()=>location.reload(),15000);
+</script>`);
+});
+
+let _proxyAgent;
+async function getProxyAgent() {
+  if (_proxyAgent) return _proxyAgent;
+  if (!PROXY_URL) return undefined;
+  const { HttpsProxyAgent } = await import("https-proxy-agent");
+  _proxyAgent = new HttpsProxyAgent(PROXY_URL);
+  return _proxyAgent;
+}
+app.get("/debug/proxy-ip", async (_req, res) => {
+  try {
+    const agent = await getProxyAgent();
+    const req = https.request({ host: "api.ipify.org", path: "/?format=json", agent }, r => {
+      let data=""; r.on("data", d => data+=d); r.on("end", () => res.type("json").send(data));
+    });
+    req.on("error", e => res.status(500).send(String(e)));
+    req.end();
+  } catch (e) { res.status(500).send(String(e)); }
+});
+
+// Visualizador de importância
+app.get("/importance.json", (_req, res) => {
+  res.json({ threshold: IMPORTANCE_THRESHOLD, count: lastScores.length, items: [...lastScores].reverse() });
+});
+app.get("/importance", (_req, res) => {
+  const esc = s => String(s||"").replace(/[<>&]/g, t => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[t]));
+  const rows = [...lastScores].reverse().map(r => `
+    <tr>
+      <td>${new Date(r.ts).toLocaleString("pt-BR", { timeZone: "America/Sao_Paulo" })}</td>
+      <td>${r.importance}</td>
+      <td>${esc(r.subject)}</td>
+      <td>${esc(r.from)}</td>
+      <td>${esc(r.summary)}</td>
+      <td>${esc(r.reason)}</td>
+    </tr>
+  `).join("");
+  res.set("content-type","text/html").send(`<!doctype html>
+  <meta name=viewport content="width=device-width,initial-scale=1">
+  <title>Importância dos e-mails</title>
+  <style>
+    body{font-family:system-ui,Arial,sans-serif;padding:16px}
+    table{width:100%;border-collapse:collapse}
+    th,td{border:1px solid #ddd;padding:8px;vertical-align:top}
+    th{background:#f5f5f5} tr:nth-child(even){background:#fafafa}
+    code{background:#f3f3f3;padding:2px 4px;border-radius:4px}
+  </style>
+  <h1>Classificações de importância</h1>
+  <p>Limiar atual: <code>${IMPORTANCE_THRESHOLD}</code> • Total guardado: <code>${lastScores.length}</code> • API: <a href="/importance.json">/importance.json</a></p>
+  <table><thead><tr><th>Quando (SP)</th><th>Score</th><th>Assunto</th><th>De</th><th>Resumo</th><th>Motivo</th></tr></thead>
+  <tbody>${rows || "<tr><td colspan=6>(vazio)</td></tr>"}</tbody></table>`);
+});
+
+// util/health
+app.get("/", (_req, res) => res.send("ok"));
+app.get("/health", (_req, res) => res.json({
+  waReady,
+  lastOpenMsAgo: Date.now()-waLastOpen,
+  seenCount: (state.seenIds||[]).length,
+  forward: !!FORWARD_WA_HTTP
+}));
+app.get("/test/wa", async (req, res) => {
+  try {
+    const id = await sendWA(req.query.to || WA_TO, req.query.text || "Teste OK");
+    res.json({ ok: true, id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+/* ===================== Boot ===================== */
+(async () => {
+  if (!FORWARD_WA_HTTP) {
+    await safeStartWA(); // esta instância mantém a sessão WA
+  } else {
+    logger.warn({ FORWARD_WA_HTTP }, "WA desabilitado aqui; encaminhando via HTTP para conversazap");
+  }
+  cron.schedule(CRON_EXPR, () => { checkIMAPOnce().catch(e => logger.error(e)); });
+  app.listen(PORT, () => logger.info({ PORT, DATA_DIR, WA_AUTH_DIR, STATE_FILE, SCORES_FILE, FORWARD_WA_HTTP }, "up"));
+})();
