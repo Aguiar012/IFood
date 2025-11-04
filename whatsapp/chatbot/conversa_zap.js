@@ -1,7 +1,6 @@
 // whatsapp/chatbot/conversa_zap.js
 import express from "express";
 import P from "pino";
-import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
 import fs from "fs";
 import path from "path";
@@ -13,7 +12,8 @@ const baileys = require("@whiskeysockets/baileys");
 const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  DisconnectReason
+  DisconnectReason,
+  Browsers
 } = baileys;
 
 // ---------- ENV ----------
@@ -88,10 +88,21 @@ for (const ev of ["SIGINT", "SIGTERM", "beforeExit", "exit"]) {
 }
 
 // ---------- Proxy ----------
+let _proxyAgent;
 async function buildProxyAgent(url) {
   if (!url) return undefined;
   const { HttpsProxyAgent } = await import("https-proxy-agent");
-  return new HttpsProxyAgent(url); // HTTPS + WS CONNECT
+  // usa keepAlive pra reduzir overhead e consumo de MB
+  const agent = new HttpsProxyAgent({ uri: url, keepAlive: true, timeout: 30_000 });
+  return agent;
+}
+function maskProxy(url) {
+  try {
+    const u = new URL(url);
+    const user = u.username ? u.username.slice(0, 4) + "***" : "";
+    const host = u.hostname ? (u.hostname.length > 6 ? u.hostname.slice(0, 3) + "***" + u.hostname.slice(-3) : u.hostname) : "";
+    return `${u.protocol}//${user ? user + ":" : ""}***@${host}:${u.port || ""}`;
+  } catch { return "invalid-proxy-url"; }
 }
 
 // ---------- Utils ----------
@@ -148,44 +159,52 @@ async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
   logger.info({ version }, "Baileys version");
+
   const agent = await buildProxyAgent(PROXY_URL);
+  if (PROXY_URL) {
+    logger.info({ proxy: maskProxy(PROXY_URL) }, "Usando proxy para HTTPS e WSS");
+  } else {
+    logger.warn("PROXY_URL não definido — tráfego sairá pelo IP do datacenter");
+  }
 
   sock = baileys.makeWASocket({
     version,
     auth: state,
     logger,
-    browser: ["IFood ZapBot", "Chrome", "14.4.1"], // nome do “dispositivo”
+    // finge um browser padrão do Baileys (melhor heurística)
+    browser: Browsers.macOS("Chrome"),
+    // aplica proxy no fetch e no websocket (WSS)
     agent,
     fetchAgent: agent,
     markOnlineOnConnect: false,
     syncFullHistory: false,
-
-    // estabilidade de conexão
     connectTimeoutMs: 60_000,
-    keepAliveIntervalMs: 15_000,
-    printQRInTerminal: true
+    keepAliveIntervalMs: 15_000
+    // NADA de printQRInTerminal (deprecado e polui logs)
   });
 
   // Salva credenciais quando atualizam
   sock.ev.on("creds.update", saveCreds);
 
-  // Backoff de reconexão
+  // Backoff de reconexão com “circuit-breaker” para evitar torrar MB em 428
   let reconnectDelay = 1500;
   const MAX_DELAY = 60_000;
+  let err428Count = 0;
+  const MAX_428 = 3; // depois disso, pausa 5 min
 
   // Atualiza status de conexão
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) {
+      // só registra uma linha e serve o QR via /qr (nada de ASCII gigante)
       globalThis.__lastQR = qr;
-      console.log("\n=== ESCANEIE ESTE QR NO WHATSAPP ===");
-      qrcode.generate(qr, { small: true });
-      console.log("Dica: GET /qr para ver a imagem grande (/qr). QR renova sozinho.\n");
+      logger.info("QR atualizado — abra /qr para escanear (auto-refresh).");
     }
 
     if (connection === "open") {
       waReady = true;
       waLastOpen = Date.now();
-      reconnectDelay = 1500; // reset backoff
+      reconnectDelay = 1500;
+      err428Count = 0;
       logger.info({ WA_AUTH_DIR, PORT }, "WA conectado");
       return;
     }
@@ -199,7 +218,12 @@ async function startWA() {
         text.includes("Stream Errored (conflict)") ||
         text.includes('"conflict"');
 
-      // Logout real: limpa auth e força novo QR
+      // Contabiliza 428/Connection Closed para segurar o loop
+      if (status === 428 || /Connection (Closed|Terminated)/i.test(text)) {
+        err428Count++;
+      }
+
+      // Logout real: zera auth e força novo QR
       if (status === DisconnectReason.loggedOut) {
         try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
         fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
@@ -209,9 +233,16 @@ async function startWA() {
         return;
       }
 
-      // Quedas (ex.: 428 Connection Terminated / QR expirado / NAT/Proxy)
       waReady = false;
-      logger.warn({ status, isConflict }, "WA desconectado");
+      logger.warn({ status, isConflict, err428Count }, "WA desconectado");
+
+      // Se estourou 428 em sequência, pausa 5 min pra não gastar proxy à toa
+      if (err428Count >= MAX_428) {
+        logger.warn("Muitos 428 seguidos — pausando reconexão por 5 minutos (verifique PROXY_URL e pareamento).");
+        setTimeout(() => { err428Count = 0; safeStartWA(); }, 5 * 60_000);
+        return;
+      }
+
       if (!isConflict) {
         setTimeout(safeStartWA, reconnectDelay);
         reconnectDelay = Math.min(reconnectDelay * 2, MAX_DELAY);
@@ -262,7 +293,7 @@ async function startWA() {
 app.get("/", (_req, res) => res.send("ok"));
 app.get("/health", (_req, res) => res.json({ waReady }));
 
-// QR grande no navegador
+// QR grande no navegador (sem depender de logs)
 app.get("/qr", (_req, res) => {
   const qr = globalThis.__lastQR || "";
   if (!qr) return res.status(404).send("QR ainda não gerado. Aguarde reconexão.");
@@ -270,8 +301,11 @@ app.get("/qr", (_req, res) => {
   res.end(`<!doctype html>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>WhatsApp QR</title>
-<style>body{margin:0;display:grid;place-items:center;height:100vh;background:#fff}</style>
-<div id="qrcode"></div>
+<style>body{margin:0;display:grid;place-items:center;height:100vh;background:#fff;font-family:sans-serif} .box{display:grid;gap:10px;place-items:center}</style>
+<div class="box">
+  <div id="qrcode"></div>
+  <small>Esta página recarrega sozinha a cada 15s</small>
+</div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
   new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(globalThis.__lastQR)}, width: 360, height: 360, correctLevel: QRCode.CorrectLevel.M });
@@ -279,20 +313,17 @@ app.get("/qr", (_req, res) => {
 </script>`);
 });
 
-// /debug/proxy-ip
-let _proxyAgent;
+// /debug/proxy-ip  → confirma se o tráfego HTTP está saindo pela proxy
 async function getProxyAgent() {
-  if (_proxyAgent) return _proxyAgent;
-  if (!PROXY_URL) return undefined;
-  const { HttpsProxyAgent } = await import("https-proxy-agent");
-  _proxyAgent = new HttpsProxyAgent(PROXY_URL);
+  if (_proxyAgent !== undefined) return _proxyAgent;
+  _proxyAgent = await buildProxyAgent(PROXY_URL);
   return _proxyAgent;
 }
 app.get("/debug/proxy-ip", async (_req, res) => {
   try {
     const agent = await getProxyAgent();
     const req = https.request({ host: "api.ipify.org", path: "/?format=json", agent }, r => {
-      let data=""; r.on("data", d => data+=d); r.on("end", () => res.type("json").send(data));
+      let data = ""; r.on("data", d => data += d); r.on("end", () => res.type("json").send(data));
     });
     req.on("error", e => res.status(500).send(String(e)));
     req.end();
@@ -313,6 +344,9 @@ app.get("/test/wa", async (req, res) => {
 (async () => {
   tryAcquireLock(); // revalida ao subir
   armWaWatchdog();
+  if (process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0") {
+    logger.warn("NODE_TLS_REJECT_UNAUTHORIZED=0 torna conexões inseguras — remova essa env.");
+  }
   await safeStartWA();
   app.listen(PORT, () => logger.info({ PORT, WA_AUTH_DIR }, "ZapBot up"));
 })();
