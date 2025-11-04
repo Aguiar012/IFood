@@ -3,32 +3,24 @@ import fs from "fs";
 import path from "path";
 import { Pool } from "pg";
 
-function onlyDigits(s = "") {
-  return (s || "").replace(/\D/g, "");
-}
-function jidToPhone(jid = "") {
-  // ex: "55119xxxxx@s.whatsapp.net" -> "55119xxxxx"
-  return onlyDigits(String(jid).split("@")[0]);
-}
-function strip(s = "") {
-  return String(s || "").trim();
-}
+function onlyDigits(s = "") { return (s || "").replace(/\D/g, ""); }
+function jidToPhone(jid = "") { return onlyDigits(String(jid).split("@")[0]); }
+function strip(s = "") { return String(s || "").trim(); }
 function norm(s = "") {
-  // lower-case sem acento
   return strip(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 function parseDiasLista(txt = "") {
   const map = {
-    "seg": 1, "segunda": 1, "segunda-feira": 1,
-    "ter": 2, "terca": 2, "terça": 2, "terça-feira": 2,
-    "qua": 3, "quarta": 3, "quarta-feira": 3,
-    "qui": 4, "quinta": 4, "quinta-feira": 4,
-    "sex": 5, "sexta": 5, "sexta-feira": 5,
+    "seg":1,"segunda":1,"segunda-feira":1,
+    "ter":2,"terca":2,"terça":2,"terça-feira":2,
+    "qua":3,"quarta":3,"quarta-feira":3,
+    "qui":4,"quinta":4,"quinta-feira":4,
+    "sex":5,"sexta":5,"sexta-feira":5,
   };
   const itens = norm(txt).split(/[,\s;/]+/).filter(Boolean);
   const dias = new Set();
   for (const it of itens) if (map[it] != null) dias.add(map[it]);
-  return [...dias].sort((a, b) => a - b);
+  return [...dias].sort((a,b)=>a-b);
 }
 function diasHumanos(dias = []) {
   const mapInv = {1:"Seg",2:"Ter",3:"Qua",4:"Qui",5:"Sex",6:"Sáb",7:"Dom"};
@@ -36,82 +28,61 @@ function diasHumanos(dias = []) {
 }
 
 export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = console }) {
-  // --------- estado em arquivo (persistente, simples) ----------
+  // --------- estado simples em arquivo ----------
   const STORE_FILE = path.join(dataDir, "conversa_flow_state.json");
   let state = {};
   try { state = JSON.parse(fs.readFileSync(STORE_FILE, "utf8")); } catch { state = {}; }
-  function saveState() {
-    try { fs.writeFileSync(STORE_FILE, JSON.stringify(state)); } catch {}
-  }
-  function getUser(jid) {
-    return state[jid] || (state[jid] = { step: "NEW", temp: {} });
-  }
+  function saveState() { try { fs.writeFileSync(STORE_FILE, JSON.stringify(state)); } catch {} }
+  function getUser(jid) { return state[jid] || (state[jid] = { step: "NEW", temp: {} }); }
   function setUser(jid, patch) {
-    state[jid] = { ...(state[jid] || { step: "NEW", temp: {} }), ...patch };
+    state[jid] = { ...(state[jid] || { step:"NEW", temp:{} }), ...patch };
     saveState();
   }
 
   // --------- DB ----------
   if (!dbUrl) throw new Error("DATABASE_URL vazio. Defina env DATABASE_URL.");
   const pool = new Pool({ connectionString: dbUrl, max: 5, idleTimeoutMillis: 30_000 });
+  async function withConn(fn){ const c = await pool.connect(); try { return await fn(c); } finally { c.release(); } }
 
-  async function withConn(fn) {
-    const client = await pool.connect();
-    try { return await fn(client); } finally { client.release(); }
-  }
-
-  // helpers de BD
-  async function findAlunoByTelefone(client, telefone) {
+  async function findAlunoByTelefone(c, telefone){
     const q = `
       SELECT a.*
       FROM aluno a
-      JOIN contato c ON c.aluno_id = a.id
-      WHERE c.telefone = $1
+      JOIN contato ctt ON ctt.aluno_id = a.id
+      WHERE ctt.telefone = $1
       LIMIT 1`;
-    const { rows } = await client.query(q, [telefone]);
+    const { rows } = await c.query(q, [telefone]);
     return rows[0] || null;
   }
-
-  async function createAlunoComContato(client, { nome, prontuario, telefone }) {
-    const insAluno = `INSERT INTO aluno (nome, prontuario, ativo) VALUES ($1,$2,true) RETURNING id`;
-    const a = await client.query(insAluno, [nome, prontuario]);
+  async function createAlunoComContato(c, { nome, prontuario, telefone }){
+    const a = await c.query(`INSERT INTO aluno (nome, prontuario, ativo) VALUES ($1,$2,true) RETURNING id`, [nome, prontuario]);
     const alunoId = a.rows[0].id;
-    const insContato = `INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`;
-    await client.query(insContato, [alunoId, telefone]);
+    await c.query(`INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`, [alunoId, telefone]);
     return alunoId;
   }
-
-  async function setPreferenciasDias(client, alunoId, dias = []) {
-    await client.query(`DELETE FROM preferencia_dia WHERE aluno_id = $1`, [alunoId]);
+  async function setPreferenciasDias(c, alunoId, dias = []){
+    await c.query(`DELETE FROM preferencia_dia WHERE aluno_id=$1`, [alunoId]);
     if (!dias.length) return;
-    const values = dias.map((d, i) => `($1,$${i + 2})`).join(",");
-    await client.query(
-      `INSERT INTO preferencia_dia (aluno_id, dia_semana) VALUES ${values}`,
-      [alunoId, ...dias]
-    );
+    const values = dias.map((d,i)=>`($1,$${i+2})`).join(",");
+    await c.query(`INSERT INTO preferencia_dia (aluno_id, dia_semana) VALUES ${values}`, [alunoId, ...dias]);
   }
-
-  async function addBloqueios(client, alunoId, nomes = []) {
-    for (const nome of nomes) {
-      const n = strip(nome);
-      if (!n) continue;
-      // evita duplicar (case-insensitive)
-      await client.query(
+  async function addBloqueios(c, alunoId, nomes = []){
+    for (const nome of nomes.map(strip).filter(Boolean)) {
+      await c.query(
         `INSERT INTO prato_bloqueado (aluno_id, nome)
          SELECT $1, $2
          WHERE NOT EXISTS (
            SELECT 1 FROM prato_bloqueado WHERE aluno_id=$1 AND lower(nome)=lower($2)
          )`,
-        [alunoId, n]
+        [alunoId, nome]
       );
     }
   }
-
-  async function setAtivo(client, alunoId, ativo) {
-    await client.query(`UPDATE aluno SET ativo=$2 WHERE id=$1`, [alunoId, !!ativo]);
+  async function setAtivo(c, alunoId, ativo){
+    await c.query(`UPDATE aluno SET ativo=$2 WHERE id=$1`, [alunoId, !!ativo]);
   }
 
-  // --------- respostas prontas ----------
+  // --------- textos ----------
   const helpText =
     "Comandos:\n" +
     "• *Cancelar* – marcar que você não vai almoçar hoje (por enquanto só confirmamos).\n" +
@@ -120,10 +91,11 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     "• *Ativar* / *Desativar* – ligar/desligar seu cadastro.\n" +
     "• *Ajuda* – ver este menu.";
 
-  // --------- mensagem de onboarding (a pedido) ----------
-  const ONBOARDING =
-    "Olá sou o robo pra te ajudar a pedir seu almoço por você! " +
-    "caso diga *CONTINUAR* iremos te cadrastrar e você poderar nos dizer suas preferencias de dias de almoço etc";
+  // onboarding pedido (mantive sua redação)
+  const ONBOARDING = 
+    "Oi! Eu sou o robô que vai te ajudar a pedir seu almoço de forma automática. " +
+    "Se quiser começar, envie *CONTINUAR* e eu vou te cadastrar rapidinho. " +
+    "Depois disso, você poderá me dizer seus dias preferidos, horários e outras preferências!";
 
   // --------- handler principal ----------
   async function handleText(jid, textRaw) {
@@ -132,13 +104,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
     const u = getUser(jid);
     const phone = jidToPhone(jid);
-
-    // 1) tenta achar aluno pelo telefone
     const aluno = await withConn(c => findAlunoByTelefone(c, phone));
-    if (aluno) {
-      // se achou, travamos no MAIN, mas mantemos sub-passos (preferências, bloqueios)
-      if (!u.aluno_id) setUser(jid, { aluno_id: aluno.id, step: "MAIN", temp: {} });
-    }
+    if (aluno && !u.aluno_id) setUser(jid, { aluno_id: aluno.id, step: "MAIN", temp: {} });
 
     const n = norm(text);
 
@@ -148,21 +115,21 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       return "✅ Aqui está o menu:\n" + helpText;
     }
 
-    // ================ fluxo de cadastro =================
+    // ================= cadastro (quando AINDA não existe no banco) =================
     if (!aluno) {
-      // usuário novo
+      // **FAST-FORWARD DO CONSENTIMENTO** (evita loop mesmo se step voltar pra NEW)
+      if (["sim","s","ok","yes","continuar"].includes(n)) {
+        setUser(jid, { step: "ASK_NOME", temp: {} });
+        return "Perfeito! Como devo te chamar? (envie seu *nome completo*).";
+        // (daqui pra frente fluxo normal segue)
+      }
+
       if (u.step === "NEW") {
         setUser(jid, { step: "ASK_CONSENT", temp: {} });
-        // **TROCA solicitada**
         return ONBOARDING;
       }
       if (u.step === "ASK_CONSENT") {
-        // **aceita CONTINUAR** além de SIM/S/OK/YES
-        if (["sim","s","ok","yes","continuar"].includes(n)) {
-          setUser(jid, { step: "ASK_NOME", temp: {} });
-          return "Perfeito! Como devo te chamar? (envie seu *nome completo*).";
-        }
-        // **TROCA solicitada** (reforça o onboarding em vez de pedir SIM)
+        // se não mandou CONTINUAR/consentimento, reforça a instrução
         return "Sem problemas. Quando quiser começar, responda *CONTINUAR*.";
       }
       if (u.step === "ASK_NOME") {
@@ -173,23 +140,17 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       if (u.step === "ASK_PRONT") {
         const pront = strip(text).toUpperCase();
         if (pront.length < 4) return "Formato de prontuário estranho. Envie algo como *IFSP123456*.";
-        // cria no banco
-        const alunoId = await withConn(async c => {
-          return await createAlunoComContato(c, { nome: u.temp.nome, prontuario: pront, telefone: phone });
-        });
+        const alunoId = await withConn(c => createAlunoComContato(c, {
+          nome: u.temp.nome, prontuario: pront, telefone: phone
+        }));
         setUser(jid, { step: "MAIN", temp: {}, aluno_id: alunoId });
-        return (
-          "✅ Cadastro concluído!\n" +
-          "Seu número foi salvo no sistema.\n\n" +
-          helpText
-        );
+        return "✅ Cadastro concluído!\nSeu número foi salvo no sistema.\n\n" + helpText;
       }
-      // fallback para novo — **TROCA solicitada**
+      // fallback para novos
       return ONBOARDING;
     }
 
-    // ================ fluxo principal (aluno conhecido) =================
-    // subestados (preferências / bloqueios)
+    // ================= aluno já conhecido =================
     if (u.step === "SET_DIAS") {
       const dias = parseDiasLista(text);
       if (!dias.length) return "Não entendi os dias. Envie algo como: *seg, qua, sex*.";
@@ -198,50 +159,31 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       return `Preferências atualizadas: ${diasHumanos(dias)} ✅`;
     }
     if (u.step === "SET_BLOQ") {
-      // aceita lista separada por vírgula
-      const itens = text.split(/[,;\n]+/).map(s => strip(s)).filter(Boolean);
+      const itens = text.split(/[,;\n]+/).map(strip).filter(Boolean);
       if (!itens.length) return "Envie os pratos separados por vírgula (ex.: *carne moída, estrogonofe*).";
       await withConn(c => addBloqueios(c, aluno.id, itens));
       setUser(jid, { step: "MAIN", temp: {} });
       return `Bloqueios salvos: ${itens.join(", ")} ✅`;
     }
 
-    // intenções simples
     if (n.startsWith("cancelar") || n === "nao vou" || n === "nao vou almocar" || n === "não vou" || n === "não vou almoçar") {
-      // v0: apenas confirma (sem e-mail)
       return "Ok, anotado: hoje você *não pretende almoçar*. Em breve avisaremos a secretaria automaticamente. Digite *Ajuda* para opções.";
     }
-
     if (n.startsWith("preferencia") || n === "preferencias" || n === "dia" || n === "dias") {
       setUser(jid, { step: "SET_DIAS", temp: {} });
       return "Quais dias você costuma almoçar? Envie *seg, ter, qua, qui, sex* (separe por vírgulas).";
     }
-
     if (n.startsWith("bloquear") || n.includes("nao como") || n.includes("não como") || n.includes("alergia")) {
       setUser(jid, { step: "SET_BLOQ", temp: {} });
       return "Envie os *pratos* que deseja bloquear, separados por vírgula. Ex.: *frango xadrez, feijoada*";
     }
+    if (n === "ativar") { await withConn(c => setAtivo(c, aluno.id, true)); return "Cadastro *ativado* ✅"; }
+    if (n === "desativar" || n === "pausar") { await withConn(c => setAtivo(c, aluno.id, false)); return "Cadastro *desativado* (você pode enviar *Ativar* quando quiser voltar)."; }
+    if (n === "cadastrar") return "Seu número *já está cadastrado*. Digite *Ajuda* para ver os comandos.";
 
-    if (n === "ativar") {
-      await withConn(c => setAtivo(c, aluno.id, true));
-      return "Cadastro *ativado* ✅";
-    }
-
-    if (n === "desativar" || n === "pausar") {
-      await withConn(c => setAtivo(c, aluno.id, false));
-      return "Cadastro *desativado* (você pode enviar *Ativar* quando quiser voltar).";
-    }
-
-    if (n === "cadastrar") {
-      // já é cadastrado
-      return "Seu número *já está cadastrado*. Digite *Ajuda* para ver os comandos.";
-    }
-
-    // default
     return "Não entendi. Digite *Ajuda* para ver os comandos.";
   }
 
-  async function close() { try { await pool.end(); } catch {} }
-
+  async function close(){ try { await pool.end(); } catch {} }
   return { handleText, close };
 }
