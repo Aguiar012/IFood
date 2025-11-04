@@ -120,6 +120,11 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     "• *Ativar* / *Desativar* – ligar/desligar seu cadastro.\n" +
     "• *Ajuda* – ver este menu.";
 
+  // --------- mensagem de onboarding (a pedido) ----------
+  const ONBOARDING =
+    "Olá sou o robo pra te ajudar a pedir seu almoço por você! " +
+    "caso diga *CONTINUAR* iremos te cadrastrar e você poderar nos dizer suas preferencias de dias de almoço etc";
+
   // --------- handler principal ----------
   async function handleText(jid, textRaw) {
     const text = strip(textRaw);
@@ -148,14 +153,17 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       // usuário novo
       if (u.step === "NEW") {
         setUser(jid, { step: "ASK_CONSENT", temp: {} });
-        return "Posso cadastrar seu número, nome e prontuário para uso no RU? Responda *SIM* para continuar.";
+        // **TROCA solicitada**
+        return ONBOARDING;
       }
       if (u.step === "ASK_CONSENT") {
-        if (["sim","s","ok","yes"].includes(n)) {
+        // **aceita CONTINUAR** além de SIM/S/OK/YES
+        if (["sim","s","ok","yes","continuar"].includes(n)) {
           setUser(jid, { step: "ASK_NOME", temp: {} });
           return "Perfeito! Como devo te chamar? (envie seu *nome completo*).";
         }
-        return "Sem problemas. Quando quiser começar, responda *SIM*.";
+        // **TROCA solicitada** (reforça o onboarding em vez de pedir SIM)
+        return "Sem problemas. Quando quiser começar, responda *CONTINUAR*.";
       }
       if (u.step === "ASK_NOME") {
         if (text.length < 2) return "Nome muito curto. Envie seu *nome completo*.";
@@ -176,8 +184,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           helpText
         );
       }
-      // fallback para novo
-      return "Para começarmos, responda *SIM* para autorizar o cadastro.";
+      // fallback para novo — **TROCA solicitada**
+      return ONBOARDING;
     }
 
     // ================ fluxo principal (aluno conhecido) =================
