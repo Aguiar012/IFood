@@ -4,6 +4,7 @@ import P from "pino";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import https from "https";
 import { createRequire } from "module";
@@ -18,29 +19,27 @@ const {
   Browsers,
   extractMessageContent,
   jidNormalizedUser,
-  getContentType
+  getContentType,
 } = baileys;
 
 import paths from "../paths.js";
 import { createConversaFlow } from "./conversa_flow.js";
 
-
+/* ===================== CONST / ENV ===================== */
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
-
-const { handleText } = createConversaFlow({
-  dataDir: paths.DATA_DIR,          // <-- antes era /app/data (global); agora é /app/data/conversazap
-  dbUrl: process.env.DATABASE_URL,
-  logger: console,
-});
-
-// Porta sem secrets (auto): conversazap -> 3001, aviso_suap -> 3000
-const PORT = Number(process.env.PORT)
-  || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
-
-/* ===================== ENV ===================== */
-const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
+const PROXY_URL = process.env.PROXY_URL || "";
+const PORT =
+  Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
+
+// lock para evitar 2 pods/instâncias usando o MESMO volume
+const HOST = process.env.HOSTNAME || os.hostname();
+const STATE_DIR = path.join(DATA_DIR, "state");
+fs.mkdirSync(STATE_DIR, { recursive: true });
 fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
+const LOCK_FILE =
+  process.env.LOCK_FILE ||
+  path.join(STATE_DIR, "conversazap.lock.json");
 
 /* ===================== LOG + HTTP ===================== */
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
@@ -51,52 +50,79 @@ app.use(express.json());
 const flow = createConversaFlow({
   dataDir: DATA_DIR,
   dbUrl: process.env.DATABASE_URL,
-  logger
+  logger,
 });
 
 /* ===================== ESTADO GLOBAL ===================== */
 let sock;
 let waReady = false;
 let waLastOpen = 0;
-let wdTimer = null;
 let startingWA = false;
+let wdTimer = null;
 globalThis.__lastQR = "";
 let err428Count = 0;
 
 /* ===================== LOCK (HOST+PID+TTL) ===================== */
-
-
-function readLock() { try { return JSON.parse(fs.readFileSync(LOCK_FILE, "utf8")); } catch { return null; } }
-function writeLock() { try { fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })); } catch {} }
-function isPidAlive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
+function readLock() {
+  try {
+    return JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
+  } catch {
+    return null;
+  }
+}
+function writeLock() {
+  try {
+    fs.writeFileSync(
+      LOCK_FILE,
+      JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })
+    );
+  } catch {}
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 function tryAcquireLock() {
-  const cur = readLock(); const now = Date.now(); const TTL = 90_000;
+  const cur = readLock();
+  const now = Date.now();
+  const TTL = 90_000; // 90s
   if (cur) {
     const sameHost = cur.host === HOST;
     const fresh = now - (cur.ts || 0) < TTL;
     const alive = sameHost && cur.pid && isPidAlive(cur.pid);
-    if (sameHost && !alive) { writeLock(); return true; }
+    if (sameHost && !alive) {
+      writeLock();
+      return true;
+    }
     if (!sameHost && fresh) {
       console.error("Outra instância ativa usando o mesmo volume. Abortando.");
       process.exit(1);
     }
   }
-  writeLock(); return true;
+  writeLock();
+  return true;
 }
-if (!tryAcquireLock()) { console.error("Falha ao adquirir lock. Abortando."); process.exit(1); }
+if (!tryAcquireLock()) {
+  console.error("Falha ao adquirir lock. Abortando.");
+  process.exit(1);
+}
 setInterval(writeLock, 30_000);
-
-/* limpar lock ao sair */
 for (const ev of ["SIGINT", "SIGTERM", "beforeExit", "exit"]) {
   process.on(ev, () => {
     try {
       const cur = readLock();
-      if (cur && cur.host === HOST && cur.pid === process.pid) fs.unlinkSync(LOCK_FILE);
+      if (cur && cur.host === HOST && cur.pid === process.pid) {
+        fs.unlinkSync(LOCK_FILE);
+      }
     } catch {}
   });
 }
 
-/* ===================== Proxy ===================== */
+/* ===================== Proxy Helpers ===================== */
 let __proxyAgent;
 async function buildProxyAgent(url) {
   if (!url) return undefined;
@@ -112,7 +138,9 @@ function maskProxy(u) {
     if (m.username) m.username = "****";
     if (m.password) m.password = "****";
     return m.toString();
-  } catch { return "****"; }
+  } catch {
+    return "****";
+  }
 }
 
 /* ===================== Utils ===================== */
@@ -129,22 +157,27 @@ async function sendWA(to, text) {
   return sent?.key?.id;
 }
 
-/* ===================== Watchdog ===================== */
+/* ===================== Watchdog (keepalive + stale) ===================== */
 function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
-    const stale = Date.now() - waLastOpen > 4 * 60 * 1000;
+    const stale = Date.now() - waLastOpen > 4 * 60 * 1000; // 4 min sem "open"
     if (stale || !waReady) {
       logger.warn({ waReady, stale }, "WA watchdog: restarting socket");
-      try { sock?.ws?.close(); } catch {}
+      try {
+        sock?.ws?.close();
+      } catch {}
       await safeStartWA();
     } else {
-      try { sock?.ws?.ping?.(); } catch {}
+      try {
+        // ping para manter NAT/proxy acordado
+        sock?.ws?.ping?.();
+      } catch {}
     }
   }, 60_000);
 }
 
-/* ===================== SaveCreds hooks (uma vez só) ===================== */
+/* ===================== SaveCreds hook ===================== */
 let _saveCredsRef = async () => {};
 let _sigHooked = false;
 function registerSaveCreds(fn) {
@@ -152,7 +185,11 @@ function registerSaveCreds(fn) {
   if (_sigHooked) return;
   _sigHooked = true;
   for (const sig of ["SIGINT", "SIGTERM"]) {
-    process.on(sig, async () => { try { await _saveCredsRef(); } catch {} });
+    process.on(sig, async () => {
+      try {
+        await _saveCredsRef();
+      } catch {}
+    });
   }
 }
 
@@ -161,7 +198,9 @@ async function safeStartWA() {
   if (startingWA) return;
   startingWA = true;
   try {
-    try { sock?.ws?.close(); } catch {}
+    try {
+      sock?.ws?.close();
+    } catch {}
     await startWA();
   } finally {
     startingWA = false;
@@ -175,6 +214,7 @@ async function startWA() {
 
   const { version } = await fetchLatestBaileysVersion();
   logger.info({ version }, "Baileys version");
+
   const agent = await buildProxyAgent(PROXY_URL);
   const browser = Browsers.macOS("Chrome");
 
@@ -183,32 +223,35 @@ async function startWA() {
     auth: state,
     logger,
     browser,
-    agent,              // WebSocket via proxy
-    fetchAgent: agent,  // HTTP via proxy (media, check-ins)
+    agent, // WSS via proxy
+    fetchAgent: agent, // HTTPS via proxy (media/check-ins)
     markOnlineOnConnect: false,
     syncFullHistory: false,
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
-    printQRInTerminal: false
+    printQRInTerminal: false,
+    shouldIgnoreJid: (jid) => String(jid).endsWith("@newsletter"),
   });
 
   sock.ev.on("creds.update", saveCreds);
 
-  let reconnectDelay = 1500;
+  let reconnectDelay = 1_500;
   const MAX_DELAY = 60_000;
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) {
       globalThis.__lastQR = qr;
       logger.info("QR atualizado — abra /qr");
-      qrcode.generate(qr, { small: true });
+      try {
+        qrcode.generate(qr, { small: true });
+      } catch {}
     }
 
     if (connection === "open") {
       waReady = true;
       waLastOpen = Date.now();
       err428Count = 0;
-      reconnectDelay = 1500;
+      reconnectDelay = 1_500;
       logger.info({ WA_AUTH_DIR, PORT }, "WA conectado");
       return;
     }
@@ -216,32 +259,48 @@ async function startWA() {
     if (connection === "close") {
       const err = lastDisconnect?.error;
       const status = new Boom(err)?.output?.statusCode;
+      const text = String(err || "");
 
-      if (status === DisconnectReason.loggedOut) {
-        try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
+      // "conflict" (sessão em outro lugar)
+      const isConflict =
+        status === 409 ||
+        status === 440 ||
+        text.includes("Stream Errored (conflict)") ||
+        text.includes('"conflict"');
+
+      if (status === DisconnectReason.loggedOut || isConflict) {
+        // zera sessão p/ forçar QR novo
+        try {
+          fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true });
+        } catch {}
         fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
         waReady = false;
-        logger.warn({ status }, "Logout detectado — auth resetado, gere novo QR.");
-        setTimeout(safeStartWA, 1500);
+        logger.warn({ status, isConflict }, "Logout/substituída — gere novo QR.");
+        setTimeout(safeStartWA, 1_500);
         return;
       }
 
       if (status === 428) {
+        // Precondition Required: espere mais antes de reconectar
         err428Count++;
-        logger.warn({ status, err428Count }, "WA desconectado (428)");
         waReady = false;
-        const hold =
-          err428Count === 1 ? 30_000 :
-          err428Count === 2 ? 120_000 :
-          err428Count <= 4 ? 600_000 :
-          1_800_000;
-        setTimeout(safeStartWA, hold);
+        const base =
+          err428Count === 1
+            ? 30_000
+            : err428Count === 2
+            ? 120_000
+            : err428Count <= 4
+            ? 600_000
+            : 1_800_000;
+        const jitter = Math.floor(Math.random() * 5_000);
+        logger.warn({ status, err428Count, waitMs: base + jitter }, "WA desconectado (428)");
+        setTimeout(safeStartWA, base + jitter);
         return;
       }
 
       waReady = false;
       logger.warn({ status }, "WA desconectado");
-      setTimeout(safeStartWA, reconnectDelay);
+      setTimeout(safeStartWA, reconnectDelay + Math.floor(Math.random() * 500));
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_DELAY);
     }
   });
@@ -250,22 +309,18 @@ async function startWA() {
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       if (!messages?.length) return;
+
       for (const m of messages) {
         const fromMe = !!m.key?.fromMe;
         let jid = m.key?.remoteJid || "";
         if (!jid || jid.endsWith("@status")) continue;
-
-        // normaliza (remove device suffix / lid forms)
         jid = jidNormalizedUser(jid);
 
-        // log bruto
         const ct = getContentType(m.message);
         logger.info({ type, fromMe, jid, ct }, "RX upsert");
-
-        // só responda outros (se quiser ecoar seus próprios, troque aqui)
         if (fromMe) continue;
 
-        // extrai texto de forma robusta
+        // extrai texto
         const content = extractMessageContent(m.message) || {};
         const text =
           content.conversation ||
@@ -282,8 +337,10 @@ async function startWA() {
           continue;
         }
 
-        // marca como lido + presença
-        try { await sock.readMessages([m.key]); } catch {}
+        // read + presença simulada
+        try {
+          await sock.readMessages([m.key]);
+        } catch {}
         try {
           await sock.presenceSubscribe(jid);
           await sock.sendPresenceUpdate("composing", jid);
@@ -291,7 +348,7 @@ async function startWA() {
           await sock.sendPresenceUpdate("paused", jid);
         } catch {}
 
-        // chama o motor de conversa
+        // conversa
         let reply = "";
         try {
           reply = await flow.handleText(jid, text);
@@ -299,8 +356,6 @@ async function startWA() {
           logger.error({ err: String(e) }, "flow.handleText falhou");
           reply = "Desculpa, falhei aqui. Tenta de novo em instantes.";
         }
-
-        // fallback de teste
         if (!reply) reply = "ok";
 
         await sock.sendMessage(jid, { text: reply });
@@ -314,7 +369,9 @@ async function startWA() {
 
 /* ===================== HTTP util ===================== */
 app.get("/", (_req, res) => res.send("ok"));
-app.get("/health", (_req, res) => res.json({ waReady, ts: Date.now() }));
+app.get("/health", (_req, res) =>
+  res.json({ waReady, ts: Date.now(), lastOpenMsAgo: Date.now() - waLastOpen })
+);
 
 app.get("/qr", (_req, res) => {
   const qr = globalThis.__lastQR || "";
@@ -327,7 +384,9 @@ app.get("/qr", (_req, res) => {
 <div id="qrcode"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
-  new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(globalThis.__lastQR)}, width: 360, height: 360, correctLevel: QRCode.CorrectLevel.M });
+  new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(
+    globalThis.__lastQR
+  )}, width: 360, height: 360, correctLevel: QRCode.CorrectLevel.M });
   setTimeout(()=>location.reload(),15000);
 </script>`);
 });
@@ -344,12 +403,19 @@ async function getProxyAgent() {
 app.get("/debug/proxy-ip", async (_req, res) => {
   try {
     const agent = await getProxyAgent();
-    const req = https.request({ host: "api.ipify.org", path: "/?format=json", agent }, r => {
-      let data=""; r.on("data", d => data+=d); r.on("end", () => res.type("json").send(data));
-    });
-    req.on("error", e => res.status(500).send(String(e)));
+    const req = https.request(
+      { host: "api.ipify.org", path: "/?format=json", agent },
+      (r) => {
+        let data = "";
+        r.on("data", (d) => (data += d));
+        r.on("end", () => res.type("json").send(data));
+      }
+    );
+    req.on("error", (e) => res.status(500).send(String(e)));
     req.end();
-  } catch (e) { res.status(500).send(String(e)); }
+  } catch (e) {
+    res.status(500).send(String(e));
+  }
 });
 
 // /debug/ws — testa WebSocket via o MESMO proxy
@@ -357,20 +423,31 @@ app.get("/debug/ws", async (_req, res) => {
   try {
     const agent = await getProxyAgent();
     const t0 = Date.now();
-    const ws = new WebSocket("wss://echo.websocket.events/", { agent, handshakeTimeout: 10000 });
+    const ws = new WebSocket("wss://echo.websocket.events/", {
+      agent,
+      handshakeTimeout: 10_000,
+    });
     let done = false;
     ws.on("open", () => ws.send("ping"));
     ws.on("message", () => {
-      if (done) return; done = true; ws.close();
-      res.json({ ok: true, viaProxy: !!agent, rttMs: Date.now()-t0 });
+      if (done) return;
+      done = true;
+      ws.close();
+      res.json({ ok: true, viaProxy: !!agent, rttMs: Date.now() - t0 });
     });
     ws.on("error", (e) => {
-      if (done) return; done = true; res.status(500).json({ ok: false, error: String(e) });
+      if (done) return;
+      done = true;
+      res.status(500).json({ ok: false, error: String(e) });
     });
     setTimeout(() => {
-      if (done) return; done = true; try { ws.terminate(); } catch {}
+      if (done) return;
+      done = true;
+      try {
+        ws.terminate();
+      } catch {}
       res.status(504).json({ ok: false, error: "timeout" });
-    }, 12000);
+    }, 12_000);
   } catch (e) {
     res.status(500).json({ ok: false, error: String(e) });
   }
@@ -391,6 +468,10 @@ app.get("/test/wa", async (req, res) => {
   tryAcquireLock(); // revalida ao subir
   armWaWatchdog();
   await safeStartWA();
-  logger.info({ PORT, DATA_DIR, WA_AUTH_DIR }, "up");
   app.listen(PORT, () => logger.info({ PORT, WA_AUTH_DIR }, "ZapBot up"));
+  logger.info({ PORT, DATA_DIR, WA_AUTH_DIR }, "up");
 })();
+
+/* ===================== Hardening de processo ===================== */
+process.on("unhandledRejection", (e) => logger.error({ err: String(e) }, "unhandledRejection"));
+process.on("uncaughtException", (e) => logger.error({ err: String(e) }, "uncaughtException"));
