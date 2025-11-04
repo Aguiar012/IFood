@@ -22,7 +22,7 @@ import https from "https";
 import Imap from "imap-simple";
 import { simpleParser } from "mailparser";
 
-import paths from "./whatsapp/paths.js";
+import paths from "../paths.js";
 import { createConversaFlow } from "./whatsapp/chatbot/conversa_flow.js";
 
 
@@ -49,9 +49,6 @@ const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const STATE_FILE = process.env.STATE_PATH || path.join(DATA_DIR, "state", "state.json");
 const SCORES_FILE = process.env.SCORES_PATH || path.join(DATA_DIR, "state", "scores.json");
 const LOCK_FILE = process.env.LOCK_FILE || path.join(DATA_DIR, "state", "lock.json");
-for (const p of [WA_AUTH_DIR, path.dirname(STATE_FILE), path.dirname(SCORES_FILE), path.dirname(LOCK_FILE)]) {
-  fs.mkdirSync(p, { recursive: true });
-}
 
 const EMAIL_USER = process.env.EMAIL_USER;       // Gmail do bot (com 2FA)
 const EMAIL_APP_PASSWORD = process.env.EMAIL_APP_PASSWORD; // App password (16 chars)
