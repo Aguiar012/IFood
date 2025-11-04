@@ -40,7 +40,6 @@ const PORT = Number(process.env.PORT)
 /* ===================== ENV ===================== */
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
-const WA_AUTH_DIR = process.env.WA_AUTH_DIR || path.join(DATA_DIR, "wa_auth_zapbot");
 fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
 
 /* ===================== LOG + HTTP ===================== */
