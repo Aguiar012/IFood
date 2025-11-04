@@ -46,7 +46,6 @@ const PROXY_URL = process.env.PROXY_URL || "";   // http://USER:PASS@HOST:PORT
 
 // >>> PERSISTÊNCIA NO VOLUME /app/data <<<
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
-const WA_AUTH_DIR = process.env.WA_AUTH_DIR || path.join(DATA_DIR, "wa_auth");
 const STATE_FILE = process.env.STATE_PATH || path.join(DATA_DIR, "state", "state.json");
 const SCORES_FILE = process.env.SCORES_PATH || path.join(DATA_DIR, "state", "scores.json");
 const LOCK_FILE = process.env.LOCK_FILE || path.join(DATA_DIR, "state", "lock.json");
