@@ -9,6 +9,8 @@ function strip(s = "") { return String(s || "").trim(); }
 function norm(s = "") {
   return strip(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
+
+// ---- dias da semana ----
 function parseDiasLista(txt = "") {
   const map = {
     "seg":1,"segunda":1,"segunda-feira":1,
@@ -25,6 +27,16 @@ function parseDiasLista(txt = "") {
 function diasHumanos(dias = []) {
   const mapInv = {1:"Seg",2:"Ter",3:"Qua",4:"Qui",5:"Sex",6:"Sáb",7:"Dom"};
   return (dias || []).map(d => mapInv[d] || d).join(", ");
+}
+
+// ---- data & cutoff 13:15 ----
+const DIA_LONGO = ["Domingo","Segunda","Terça","Quarta","Quinta","Sexta","Sábado"];
+function ddmm(d){ const x=new Date(d); const dd=String(x.getDate()).padStart(2,"0"); const mm=String(x.getMonth()+1).padStart(2,"0"); return `${dd}/${mm}`; }
+function addDays(d, n){ const x=new Date(d); x.setDate(x.getDate()+n); return x; }
+function cutoff1315(dt){ const x=new Date(dt); x.setHours(13,15,0,0); return x; }
+function diaCancelamentoAlvo(now=new Date()){
+  // <= 13:15 → hoje; > 13:15 → amanhã
+  return (now <= cutoff1315(now)) ? now : addDays(now,1);
 }
 
 export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = console }) {
@@ -85,14 +97,13 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   // --------- textos ----------
   const helpText =
     "Comandos:\n" +
-    "• *Cancelar* – marcar que você não vai almoçar hoje (por enquanto só confirmamos).\n" +
+    "• *Cancelar* – cancelar o almoço (por enquanto só confirmamos o pedido de envio).\n" +
     "• *Preferência* – escolher dias da semana (seg…sex).\n" +
     "• *Bloquear* – informar pratos que você não come.\n" +
     "• *Ativar* / *Desativar* – ligar/desligar seu cadastro.\n" +
     "• *Ajuda* – ver este menu.";
 
-  // onboarding pedido (mantive sua redação)
-  const ONBOARDING = 
+  const ONBOARDING =
     "Oi! Eu sou o robô que vai te ajudar a pedir seu almoço de forma automática. " +
     "Se quiser começar, envie *CONTINUAR* e eu vou te cadastrar rapidinho. " +
     "Depois disso, você poderá me dizer seus dias preferidos, horários e outras preferências!";
@@ -115,13 +126,12 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       return "✅ Aqui está o menu:\n" + helpText;
     }
 
-    // ================= cadastro (quando AINDA não existe no banco) =================
+    // ================= cadastro (ainda não existe no banco) =================
     if (!aluno) {
-      // **FAST-FORWARD DO CONSENTIMENTO** (evita loop mesmo se step voltar pra NEW)
+      // fast-forward do consentimento
       if (["sim","s","ok","yes","continuar"].includes(n)) {
         setUser(jid, { step: "ASK_NOME", temp: {} });
         return "Perfeito! Como devo te chamar? (envie seu *nome completo*).";
-        // (daqui pra frente fluxo normal segue)
       }
 
       if (u.step === "NEW") {
@@ -129,24 +139,40 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         return ONBOARDING;
       }
       if (u.step === "ASK_CONSENT") {
-        // se não mandou CONTINUAR/consentimento, reforça a instrução
         return "Sem problemas. Quando quiser começar, responda *CONTINUAR*.";
       }
       if (u.step === "ASK_NOME") {
         if (text.length < 2) return "Nome muito curto. Envie seu *nome completo*.";
         setUser(jid, { step: "ASK_PRONT", temp: { ...u.temp, nome: strip(text) } });
-        return "Agora envie seu *prontuário* (ex.: IFSP123456).";
+        return "Agora envie seu *prontuário* (ex.: *3029701* ou *3X028702*).";
       }
       if (u.step === "ASK_PRONT") {
-        const pront = strip(text).toUpperCase();
-        if (pront.length < 4) return "Formato de prontuário estranho. Envie algo como *IFSP123456*.";
-        const alunoId = await withConn(c => createAlunoComContato(c, {
-          nome: u.temp.nome, prontuario: pront, telefone: phone
-        }));
+        const pront = strip(text).toUpperCase().replace(/\s+/g,"");
+        // aceita A–Z e 0–9, 5 a 12 caracteres
+        if (!/^[A-Z0-9]{5,12}$/.test(pront)) {
+          return "Formato de prontuário inválido. Envie algo como *3029701* ou *3X028702* (5 a 12 caracteres, letras e números).";
+        }
+        // guarda prontuário, pede dias preferidos antes de concluir
+        setUser(jid, { step: "ASK_DIAS_REG", temp: { ...u.temp, prontuario: pront } });
+        return "Quais dias você costuma almoçar? Envie *seg, ter, qua, qui, sex* (separe por vírgulas).";
+      }
+      if (u.step === "ASK_DIAS_REG") {
+        const dias = parseDiasLista(text);
+        if (!dias.length) return "Não entendi os dias. Envie algo como: *seg, qua, sex*.";
+        // cria no banco + salva dias
+        const alunoId = await withConn(async c => {
+          const id = await createAlunoComContato(c, {
+            nome: u.temp.nome,
+            prontuario: u.temp.prontuario,
+            telefone: phone
+          });
+          await setPreferenciasDias(c, id, dias);
+          return id;
+        });
         setUser(jid, { step: "MAIN", temp: {}, aluno_id: alunoId });
         return "✅ Cadastro concluído!\nSeu número foi salvo no sistema.\n\n" + helpText;
       }
-      // fallback para novos
+      // fallback
       return ONBOARDING;
     }
 
@@ -165,18 +191,46 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       setUser(jid, { step: "MAIN", temp: {} });
       return `Bloqueios salvos: ${itens.join(", ")} ✅`;
     }
-
-    if (n.startsWith("cancelar") || n === "nao vou" || n === "nao vou almocar" || n === "não vou" || n === "não vou almoçar") {
-      return "Ok, anotado: hoje você *não pretende almoçar*. Em breve avisaremos a secretaria automaticamente. Digite *Ajuda* para opções.";
+    if (u.step === "CONFIRM_CANCEL") {
+      if (["sim","s","ok","yes","confirmar","confirmo"].includes(n)) {
+        const d = new Date(u.temp?.cancelDate || new Date());
+        const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
+        setUser(jid, { step: "MAIN", temp: {} });
+        // v0: só confirma o pedido; (hook de e-mail pode ser plugado aqui depois)
+        return `✅ Pedido registrado: enviaremos à CAE o cancelamento do almoço de *${alvo}* com o prontuário *${aluno.prontuario}*.`;
+      }
+      if (["nao","não","n","cancelar","voltar","parar"].includes(n)) {
+        setUser(jid, { step: "MAIN", temp: {} });
+        return "Beleza, não vou cancelar. Digite *Ajuda* para opções.";
+      }
+      // repete a confirmação se vier algo diferente
+      const d = new Date(u.temp?.cancelDate || new Date());
+      const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
+      return `Só para confirmar: deseja que eu envie à CAE o cancelamento do almoço de *${alvo}* usando seu prontuário *${aluno.prontuario}*? Responda *SIM* para confirmar ou *NÃO* para voltar.`;
     }
+
+    // intenções
+    if (n.startsWith("cancelar") || n === "nao vou" || n === "nao vou almocar" || n === "não vou" || n === "não vou almoçar") {
+      const alvoDate = diaCancelamentoAlvo(new Date());
+      setUser(jid, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate } });
+      const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
+      return (
+        `Pela regra do RU: até *13:15* você cancela *o almoço de hoje*; depois disso, vale para *amanhã*.\n\n` +
+        `Você quer que eu envie à *CAE* um e-mail de cancelamento do almoço de *${alvo}* ` +
+        `usando o seu prontuário *${aluno.prontuario}*? Responda *SIM* para confirmar ou *NÃO* para voltar.`
+      );
+    }
+
     if (n.startsWith("preferencia") || n === "preferencias" || n === "dia" || n === "dias") {
       setUser(jid, { step: "SET_DIAS", temp: {} });
       return "Quais dias você costuma almoçar? Envie *seg, ter, qua, qui, sex* (separe por vírgulas).";
     }
+
     if (n.startsWith("bloquear") || n.includes("nao como") || n.includes("não como") || n.includes("alergia")) {
       setUser(jid, { step: "SET_BLOQ", temp: {} });
       return "Envie os *pratos* que deseja bloquear, separados por vírgula. Ex.: *frango xadrez, feijoada*";
     }
+
     if (n === "ativar") { await withConn(c => setAtivo(c, aluno.id, true)); return "Cadastro *ativado* ✅"; }
     if (n === "desativar" || n === "pausar") { await withConn(c => setAtivo(c, aluno.id, false)); return "Cadastro *desativado* (você pode enviar *Ativar* quando quiser voltar)."; }
     if (n === "cadastrar") return "Seu número *já está cadastrado*. Digite *Ajuda* para ver os comandos.";
