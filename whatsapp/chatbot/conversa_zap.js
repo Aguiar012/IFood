@@ -4,7 +4,6 @@ import P from "pino";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
 import fs from "fs";
-import os from "os";
 import path from "path";
 import https from "https";
 import { createRequire } from "module";
@@ -19,239 +18,206 @@ const {
   Browsers,
   extractMessageContent,
   jidNormalizedUser,
-  getContentType,
+  getContentType
 } = baileys;
 
 import paths from "../paths.js";
 import { createConversaFlow } from "./conversa_flow.js";
 
-/* ===================== CONST / ENV ===================== */
-const WA_AUTH_DIR = paths.WA_AUTH_DIR;
-const DATA_DIR = process.env.DATA_DIR || "/app/data";
+// ====== ENV ======
+const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 const PROXY_URL = process.env.PROXY_URL || "";
-const PORT =
-  Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
-
-// lock para evitar 2 pods/instâncias usando o MESMO volume
-const HOST = process.env.HOSTNAME || os.hostname();
-const STATE_DIR = path.join(DATA_DIR, "state");
-fs.mkdirSync(STATE_DIR, { recursive: true });
+const DATA_DIR = process.env.DATA_DIR || "/app/data";
+const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
-const LOCK_FILE =
-  process.env.LOCK_FILE ||
-  path.join(STATE_DIR, "conversazap.lock.json");
 
-/* ===================== LOG + HTTP ===================== */
+// janelas de saúde
+const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "6"); // minutos sem pong => falhar /health
+const PING_EVERY_MS = 45_000;
+const PONG_GRACE_MS = 120_000;
+
+// ====== LOG/HTTP ======
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 app.use(express.json());
 
-/* ===================== FLOW ===================== */
+// ====== FLOW ======
 const flow = createConversaFlow({
   dataDir: DATA_DIR,
   dbUrl: process.env.DATABASE_URL,
-  logger,
+  logger
 });
 
-/* ===================== ESTADO GLOBAL ===================== */
-let sock;
+// ====== ESTADO ======
+let sock = null;
 let waReady = false;
 let waLastOpen = 0;
-let startingWA = false;
 let wdTimer = null;
-globalThis.__lastQR = "";
+let startingWA = false;
+let startingSince = 0;
 let err428Count = 0;
+let lastPongAt = 0;
+let lastActivityAt = 0; // RX/TX recente
+globalThis.__lastQR = "";
 
-/* ===================== LOCK (HOST+PID+TTL) ===================== */
-function readLock() {
-  try {
-    return JSON.parse(fs.readFileSync(LOCK_FILE, "utf8"));
-  } catch {
-    return null;
-  }
-}
-function writeLock() {
-  try {
-    fs.writeFileSync(
-      LOCK_FILE,
-      JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })
-    );
-  } catch {}
-}
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-function tryAcquireLock() {
-  const cur = readLock();
-  const now = Date.now();
-  const TTL = 90_000; // 90s
+// ====== LOCK simples (opcional em ambiente com volume compartilhado) ======
+const HOST = process.env.HOSTNAME || "local";
+const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
+fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
+function readLock(){ try{ return JSON.parse(fs.readFileSync(LOCK_FILE,"utf8")); }catch{return null;} }
+function writeLock(){ try{ fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })); }catch{} }
+function isPidAlive(pid){ try{ process.kill(pid,0); return true; } catch { return false; } }
+(function tryAcquireLock(){
+  const cur = readLock(); const now = Date.now(); const TTL = 90_000;
   if (cur) {
     const sameHost = cur.host === HOST;
-    const fresh = now - (cur.ts || 0) < TTL;
+    const fresh = now - (cur.ts||0) < TTL;
     const alive = sameHost && cur.pid && isPidAlive(cur.pid);
-    if (sameHost && !alive) {
-      writeLock();
-      return true;
-    }
-    if (!sameHost && fresh) {
-      console.error("Outra instância ativa usando o mesmo volume. Abortando.");
-      process.exit(1);
-    }
+    if (sameHost && !alive) { writeLock(); return; }
+    if (!sameHost && fresh) { console.error("Outra instância ativa com mesmo volume. Abortando."); process.exit(1); }
   }
   writeLock();
-  return true;
-}
-if (!tryAcquireLock()) {
-  console.error("Falha ao adquirir lock. Abortando.");
-  process.exit(1);
-}
+})();
 setInterval(writeLock, 30_000);
-for (const ev of ["SIGINT", "SIGTERM", "beforeExit", "exit"]) {
-  process.on(ev, () => {
-    try {
-      const cur = readLock();
-      if (cur && cur.host === HOST && cur.pid === process.pid) {
-        fs.unlinkSync(LOCK_FILE);
-      }
-    } catch {}
-  });
-}
 
-/* ===================== Proxy Helpers ===================== */
+// ====== Proxy ======
 let __proxyAgent;
 async function buildProxyAgent(url) {
   if (!url) return undefined;
   if (__proxyAgent) return __proxyAgent;
   const { HttpsProxyAgent } = await import("https-proxy-agent");
   __proxyAgent = new HttpsProxyAgent(url);
-  logger.info({ proxy: maskProxy(url) }, "Usando proxy para HTTPS e WSS");
+  logger.info({ proxy: maskProxy(url) }, "Usando proxy para HTTPS/WSS");
   return __proxyAgent;
 }
-function maskProxy(u) {
-  try {
-    const m = new URL(u);
-    if (m.username) m.username = "****";
-    if (m.password) m.password = "****";
-    return m.toString();
-  } catch {
-    return "****";
-  }
+function maskProxy(u){
+  try{ const m = new URL(u); if(m.username) m.username="****"; if(m.password) m.password="****"; return m.toString(); }
+  catch{ return "****"; }
 }
 
-/* ===================== Utils ===================== */
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-function toJid(to) {
+// ====== Utils ======
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function toJid(to){
   if (!to) throw new Error("destinatário vazio");
-  if (to.endsWith("@s.whatsapp.net") || to.endsWith("@g.us")) return to;
-  return `${to.replace(/\D/g, "")}@s.whatsapp.net`;
+  return (to.endsWith("@s.whatsapp.net") || to.endsWith("@g.us")) ? to : `${to.replace(/\D/g,"")}@s.whatsapp.net`;
 }
-async function sendWA(to, text) {
+async function sendWA(to, text){
   if (!waReady) throw new Error("WhatsApp não conectado ainda");
   const jid = toJid(to);
   const sent = await sock.sendMessage(jid, { text });
+  lastActivityAt = Date.now();
   return sent?.key?.id;
 }
 
-/* ===================== Watchdog (keepalive + stale) ===================== */
+// ====== limpeza forte ======
+function cleanupSock() {
+  try { sock?.ws?.removeAllListeners?.(); } catch {}
+  try { sock?.ev?.removeAllListeners?.(); } catch {}
+  try { sock?.end?.(); } catch {}
+  try { sock?.ws?.close?.(); } catch {}
+  sock = null;
+}
+
+// ====== Watchdog rigoroso ======
 function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
-    const stale = Date.now() - waLastOpen > 4 * 60 * 1000; // 4 min sem "open"
-    if (stale || !waReady) {
-      logger.warn({ waReady, stale }, "WA watchdog: restarting socket");
-      try {
-        sock?.ws?.close();
-      } catch {}
-      await safeStartWA();
-    } else {
-      try {
-        // ping para manter NAT/proxy acordado
-        sock?.ws?.ping?.();
-      } catch {}
+    const now = Date.now();
+    const stale = now - waLastOpen > 4 * 60 * 1000; // sem "open" fresco
+    const noPong = now - lastPongAt > PONG_GRACE_MS; // sem pong tempo demais
+    const wsDead = !(sock?.ws) || (sock?.ws?.readyState !== 1);
+
+    // ping periódico
+    try { if (sock?.ws?.readyState === 1) { sock.ws.ping?.(); } } catch {}
+
+    if (noPong || stale || wsDead || !waReady) {
+      logger.warn({ waReady, stale, noPong, wsReady: sock?.ws?.readyState }, "Watchdog: hard restart");
+      await safeStartWA(true);
     }
-  }, 60_000);
+  }, PING_EVERY_MS);
 }
 
-/* ===================== SaveCreds hook ===================== */
+// ====== salvar creds uma vez ======
 let _saveCredsRef = async () => {};
 let _sigHooked = false;
-function registerSaveCreds(fn) {
+function registerSaveCreds(fn){
   _saveCredsRef = fn;
   if (_sigHooked) return;
   _sigHooked = true;
-  for (const sig of ["SIGINT", "SIGTERM"]) {
-    process.on(sig, async () => {
-      try {
-        await _saveCredsRef();
-      } catch {}
-    });
+  for (const sig of ["SIGINT","SIGTERM"]) {
+    process.on(sig, async () => { try { await _saveCredsRef(); } catch {} process.exit(0); });
   }
 }
 
-/* ===================== Start seguro ===================== */
-async function safeStartWA() {
+// ====== Start com “fuso de segurança” ======
+async function safeStartWA(force = false) {
+  if (startingWA && !force) return;
+  const DEADLINE_MS = 90_000;
+  if (startingWA && force && (Date.now() - startingSince > DEADLINE_MS)) {
+    // stuck: destrava
+    logger.warn("Start preso — forçando destravar startingWA");
+    startingWA = false;
+  }
   if (startingWA) return;
+
   startingWA = true;
+  startingSince = Date.now();
   try {
-    try {
-      sock?.ws?.close();
-    } catch {}
+    cleanupSock();
     await startWA();
   } finally {
     startingWA = false;
   }
 }
 
-/* ===================== WhatsApp ===================== */
+// ====== WhatsApp ======
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
   registerSaveCreds(saveCreds);
 
   const { version } = await fetchLatestBaileysVersion();
   logger.info({ version }, "Baileys version");
-
   const agent = await buildProxyAgent(PROXY_URL);
-  const browser = Browsers.macOS("Chrome");
 
   sock = baileys.makeWASocket({
     version,
     auth: state,
     logger,
-    browser,
-    agent, // WSS via proxy
-    fetchAgent: agent, // HTTPS via proxy (media/check-ins)
+    browser: Browsers.macOS("Chrome"),
+    agent,             // WSS via proxy
+    fetchAgent: agent, // HTTP via proxy
     markOnlineOnConnect: false,
     syncFullHistory: false,
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
-    shouldIgnoreJid: (jid) => String(jid).endsWith("@newsletter"),
+    shouldIgnoreJid: jid => String(jid).endsWith("@newsletter") // evita ruído em init, prática comum
   });
+
+  lastPongAt = Date.now();
+  lastActivityAt = Date.now();
+
+  // observa pongs reais
+  try { sock.ws?.on?.("pong", () => { lastPongAt = Date.now(); }); } catch {}
 
   sock.ev.on("creds.update", saveCreds);
 
-  let reconnectDelay = 1_500;
+  // reconexão com jitter
+  let reconnectDelay = 1500;
   const MAX_DELAY = 60_000;
 
   sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
     if (qr) {
       globalThis.__lastQR = qr;
       logger.info("QR atualizado — abra /qr");
-      try {
-        qrcode.generate(qr, { small: true });
-      } catch {}
+      qrcode.generate(qr, { small: true });
     }
 
     if (connection === "open") {
       waReady = true;
       waLastOpen = Date.now();
       err428Count = 0;
-      reconnectDelay = 1_500;
+      reconnectDelay = 1500;
       logger.info({ WA_AUTH_DIR, PORT }, "WA conectado");
       return;
     }
@@ -259,57 +225,36 @@ async function startWA() {
     if (connection === "close") {
       const err = lastDisconnect?.error;
       const status = new Boom(err)?.output?.statusCode;
-      const text = String(err || "");
+      waReady = false;
 
-      // "conflict" (sessão em outro lugar)
-      const isConflict =
-        status === 409 ||
-        status === 440 ||
-        text.includes("Stream Errored (conflict)") ||
-        text.includes('"conflict"');
-
-      if (status === DisconnectReason.loggedOut || isConflict) {
-        // zera sessão p/ forçar QR novo
-        try {
-          fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true });
-        } catch {}
+      if (status === DisconnectReason.loggedOut) {
+        try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
         fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
-        waReady = false;
-        logger.warn({ status, isConflict }, "Logout/substituída — gere novo QR.");
-        setTimeout(safeStartWA, 1_500);
+        logger.warn({ status }, "Logout detectado — auth resetado, gere novo QR.");
+        setTimeout(() => safeStartWA(true), 1500);
         return;
       }
 
       if (status === 428) {
-        // Precondition Required: espere mais antes de reconectar
         err428Count++;
-        waReady = false;
-        const base =
-          err428Count === 1
-            ? 30_000
-            : err428Count === 2
-            ? 120_000
-            : err428Count <= 4
-            ? 600_000
-            : 1_800_000;
-        const jitter = Math.floor(Math.random() * 5_000);
-        logger.warn({ status, err428Count, waitMs: base + jitter }, "WA desconectado (428)");
-        setTimeout(safeStartWA, base + jitter);
+        const base = 20_000;
+        // backoff com jitter, teto ~30min
+        const hold = Math.min((base * Math.pow(2, Math.min(err428Count, 6))) + Math.floor(Math.random()*base), 30*60*1000);
+        logger.warn({ status, err428Count, hold }, "WA desconectado (428)");
+        setTimeout(() => safeStartWA(true), hold);
         return;
       }
 
-      waReady = false;
       logger.warn({ status }, "WA desconectado");
-      setTimeout(safeStartWA, reconnectDelay + Math.floor(Math.random() * 500));
+      setTimeout(() => safeStartWA(true), reconnectDelay + Math.floor(Math.random()*1000));
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_DELAY);
     }
   });
 
-  /* ===== Inbound messages ===== */
+  // ===== Inbound =====
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       if (!messages?.length) return;
-
       for (const m of messages) {
         const fromMe = !!m.key?.fromMe;
         let jid = m.key?.remoteJid || "";
@@ -318,9 +263,9 @@ async function startWA() {
 
         const ct = getContentType(m.message);
         logger.info({ type, fromMe, jid, ct }, "RX upsert");
+
         if (fromMe) continue;
 
-        // extrai texto
         const content = extractMessageContent(m.message) || {};
         const text =
           content.conversation ||
@@ -332,23 +277,17 @@ async function startWA() {
           content.templateButtonReplyMessage?.selectedId ||
           "";
 
-        if (!text) {
-          logger.info({ jid }, "Sem texto extraído — ignorando.");
-          continue;
-        }
+        if (!text) continue;
 
-        // read + presença simulada
-        try {
-          await sock.readMessages([m.key]);
-        } catch {}
+        // marca lido + presença
+        try { await sock.readMessages([m.key]); } catch {}
         try {
           await sock.presenceSubscribe(jid);
           await sock.sendPresenceUpdate("composing", jid);
-          await sleep(400 + Math.floor(Math.random() * 400));
+          await sleep(300 + Math.floor(Math.random()*400));
           await sock.sendPresenceUpdate("paused", jid);
         } catch {}
 
-        // conversa
         let reply = "";
         try {
           reply = await flow.handleText(jid, text);
@@ -359,7 +298,8 @@ async function startWA() {
         if (!reply) reply = "ok";
 
         await sock.sendMessage(jid, { text: reply });
-        logger.info({ jid, reply }, "TX reply");
+        lastActivityAt = Date.now();
+        logger.info({ jid }, "TX reply");
       }
     } catch (e) {
       logger.error(e, "falha no handler de mensagem");
@@ -367,16 +307,26 @@ async function startWA() {
   });
 }
 
-/* ===================== HTTP util ===================== */
+// ====== HTTP util ======
 app.get("/", (_req, res) => res.send("ok"));
-app.get("/health", (_req, res) =>
-  res.json({ waReady, ts: Date.now(), lastOpenMsAgo: Date.now() - waLastOpen })
-);
+
+app.get("/health", (_req, res) => {
+  const now = Date.now();
+  const noPongTooLong = now - lastPongAt > LIVENESS_FAIL_MIN * 60_000;
+  const ok = waReady && !noPongTooLong;
+  res.status(ok ? 200 : 503).json({
+    ok, waReady,
+    wsReady: sock?.ws?.readyState ?? -1,
+    lastOpenMsAgo: now - waLastOpen,
+    lastPongMsAgo: now - lastPongAt,
+    lastActivityMsAgo: now - lastActivityAt
+  });
+});
 
 app.get("/qr", (_req, res) => {
   const qr = globalThis.__lastQR || "";
   if (!qr) return res.status(404).send("QR ainda não gerado. Aguarde reconexão.");
-  res.set("content-type", "text/html");
+  res.set("content-type","text/html");
   res.end(`<!doctype html>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>WhatsApp QR</title>
@@ -384,14 +334,12 @@ app.get("/qr", (_req, res) => {
 <div id="qrcode"></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script>
-  new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(
-    globalThis.__lastQR
-  )}, width: 360, height: 360, correctLevel: QRCode.CorrectLevel.M });
+  new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(globalThis.__lastQR)}, width: 360, height: 360, correctLevel: QRCode.CorrectLevel.M });
   setTimeout(()=>location.reload(),15000);
 </script>`);
 });
 
-// /debug/proxy-ip
+// debug proxy IP
 let _proxyAgentSingleton;
 async function getProxyAgent() {
   if (_proxyAgentSingleton) return _proxyAgentSingleton;
@@ -403,57 +351,35 @@ async function getProxyAgent() {
 app.get("/debug/proxy-ip", async (_req, res) => {
   try {
     const agent = await getProxyAgent();
-    const req = https.request(
-      { host: "api.ipify.org", path: "/?format=json", agent },
-      (r) => {
-        let data = "";
-        r.on("data", (d) => (data += d));
-        r.on("end", () => res.type("json").send(data));
-      }
-    );
-    req.on("error", (e) => res.status(500).send(String(e)));
+    const req = https.request({ host: "api.ipify.org", path: "/?format=json", agent }, r => {
+      let data=""; r.on("data", d => data+=d); r.on("end", () => res.type("json").send(data));
+    });
+    req.on("error", e => res.status(500).send(String(e)));
     req.end();
-  } catch (e) {
-    res.status(500).send(String(e));
-  }
+  } catch (e) { res.status(500).send(String(e)); }
 });
 
-// /debug/ws — testa WebSocket via o MESMO proxy
+// teste WS via mesmo proxy
 app.get("/debug/ws", async (_req, res) => {
   try {
     const agent = await getProxyAgent();
     const t0 = Date.now();
-    const ws = new WebSocket("wss://echo.websocket.events/", {
-      agent,
-      handshakeTimeout: 10_000,
-    });
+    const ws = new WebSocket("wss://echo.websocket.events/", { agent, handshakeTimeout: 10_000 });
     let done = false;
     ws.on("open", () => ws.send("ping"));
-    ws.on("message", () => {
-      if (done) return;
-      done = true;
-      ws.close();
-      res.json({ ok: true, viaProxy: !!agent, rttMs: Date.now() - t0 });
-    });
-    ws.on("error", (e) => {
-      if (done) return;
-      done = true;
-      res.status(500).json({ ok: false, error: String(e) });
-    });
-    setTimeout(() => {
-      if (done) return;
-      done = true;
-      try {
-        ws.terminate();
-      } catch {}
-      res.status(504).json({ ok: false, error: "timeout" });
-    }, 12_000);
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
-  }
+    ws.on("message", () => { if (done) return; done = true; ws.close(); res.json({ ok:true, viaProxy:!!agent, rttMs: Date.now()-t0 }); });
+    ws.on("error", (e) => { if (done) return; done = true; res.status(500).json({ ok:false, error:String(e) }); });
+    setTimeout(() => { if (done) return; done = true; try{ ws.terminate(); }catch{} res.status(504).json({ ok:false, error:"timeout" }); }, 12_000);
+  } catch (e) { res.status(500).json({ ok:false, error:String(e) }); }
 });
 
-// /test/wa?to=55...&text=...
+// force-restart
+app.post("/debug/force-restart", async (_req, res) => {
+  await safeStartWA(true);
+  res.json({ ok: true });
+});
+
+// teste WA
 app.get("/test/wa", async (req, res) => {
   try {
     const id = await sendWA(req.query.to, req.query.text || "Teste OK");
@@ -463,15 +389,14 @@ app.get("/test/wa", async (req, res) => {
   }
 });
 
-/* ===================== Boot ===================== */
+// ====== Boot ======
 (async () => {
-  tryAcquireLock(); // revalida ao subir
   armWaWatchdog();
-  await safeStartWA();
-  app.listen(PORT, () => logger.info({ PORT, WA_AUTH_DIR }, "ZapBot up"));
+  await safeStartWA(true);
   logger.info({ PORT, DATA_DIR, WA_AUTH_DIR }, "up");
+  app.listen(PORT, () => logger.info({ PORT, WA_AUTH_DIR }, "ZapBot up"));
 })();
 
-/* ===================== Hardening de processo ===================== */
+// endurece contra crashes silenciosos
 process.on("unhandledRejection", (e) => logger.error({ err: String(e) }, "unhandledRejection"));
 process.on("uncaughtException", (e) => logger.error({ err: String(e) }, "uncaughtException"));
