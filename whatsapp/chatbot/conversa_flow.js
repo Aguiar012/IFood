@@ -7,56 +7,95 @@ function onlyDigits(s = "") { return (s || "").replace(/\D/g, ""); }
 function jidToPhone(jid = "") { return onlyDigits(String(jid).split("@")[0]); }
 function strip(s = "") { return String(s || "").trim(); }
 function norm(s = "") {
-  return strip(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return strip(s)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
 }
 
 // ---- dias da semana ----
 function parseDiasLista(txt = "") {
   const map = {
-    "seg":1,"segunda":1,"segunda-feira":1,
-    "ter":2,"terca":2,"terça":2,"terça-feira":2,
-    "qua":3,"quarta":3,"quarta-feira":3,
-    "qui":4,"quinta":4,"quinta-feira":4,
-    "sex":5,"sexta":5,"sexta-feira":5,
+    "seg": 1, "segunda": 1, "segunda-feira": 1,
+    "ter": 2, "terca": 2, "terça": 2, "terça-feira": 2,
+    "qua": 3, "quarta": 3, "quarta-feira": 3,
+    "qui": 4, "quinta": 4, "quinta-feira": 4,
+    "sex": 5, "sexta": 5, "sexta-feira": 5,
   };
   const itens = norm(txt).split(/[,\s;/]+/).filter(Boolean);
   const dias = new Set();
   for (const it of itens) if (map[it] != null) dias.add(map[it]);
-  return [...dias].sort((a,b)=>a-b);
+  return [...dias].sort((a, b) => a - b);
 }
 function diasHumanos(dias = []) {
-  const mapInv = {1:"Seg",2:"Ter",3:"Qua",4:"Qui",5:"Sex",6:"Sáb",7:"Dom"};
+  const mapInv = { 1: "Seg", 2: "Ter", 3: "Qua", 4: "Qui", 5: "Sex", 6: "Sáb", 7: "Dom" };
   return (dias || []).map(d => mapInv[d] || d).join(", ");
 }
 
-// ---- data & cutoff 13:15 ----
-const DIA_LONGO = ["Domingo","Segunda","Terça","Quarta","Quinta","Sexta","Sábado"];
-function ddmm(d){ const x=new Date(d); const dd=String(x.getDate()).padStart(2,"0"); const mm=String(x.getMonth()+1).padStart(2,"0"); return `${dd}/${mm}`; }
-function addDays(d, n){ const x=new Date(d); x.setDate(x.getDate()+n); return x; }
-function cutoff1315(dt){ const x=new Date(dt); x.setHours(13,15,0,0); return x; }
-function diaCancelamentoAlvo(now=new Date()){
+// ---- datas / cutoff 13:15 ----
+const DIA_LONGO = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+function ddmm(d) {
+  const x = new Date(d);
+  const dd = String(x.getDate()).padStart(2, "0");
+  const mm = String(x.getMonth() + 1).padStart(2, "0");
+  return `${dd}/${mm}`;
+}
+function addDays(d, n) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+function cutoff1315(dt) {
+  const x = new Date(dt);
+  x.setHours(13, 15, 0, 0);
+  return x;
+}
+function diaCancelamentoAlvo(now = new Date()) {
   // <= 13:15 → hoje; > 13:15 → amanhã
-  return (now <= cutoff1315(now)) ? now : addDays(now,1);
+  return (now <= cutoff1315(now)) ? now : addDays(now, 1);
+}
+
+// ---- header / identidade visual ----
+function header(aluno) {
+  const base = "🟢 *IFSP Pirituba | Assistente do RU*\n";
+  if (!aluno) return base + "--------------------------------\n";
+  const pront = aluno.prontuario || "não informado";
+  return (
+    base +
+    `👤 ${aluno.nome || "Aluno"}  |  🎓 Prontuário: *${pront}*\n` +
+    "--------------------------------\n"
+  );
 }
 
 export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = console }) {
-  // --------- estado simples em arquivo ----------
+  // --------- estado em arquivo ----------
   const STORE_FILE = path.join(dataDir, "conversa_flow_state.json");
   let state = {};
   try { state = JSON.parse(fs.readFileSync(STORE_FILE, "utf8")); } catch { state = {}; }
-  function saveState() { try { fs.writeFileSync(STORE_FILE, JSON.stringify(state)); } catch {} }
-  function getUser(jid) { return state[jid] || (state[jid] = { step: "NEW", temp: {} }); }
+  function saveState() {
+    try { fs.writeFileSync(STORE_FILE, JSON.stringify(state)); } catch { }
+  }
+  function getUser(jid) {
+    return state[jid] || (state[jid] = { step: "NEW", temp: {} });
+  }
   function setUser(jid, patch) {
-    state[jid] = { ...(state[jid] || { step:"NEW", temp:{} }), ...patch };
+    state[jid] = { ...(state[jid] || { step: "NEW", temp: {} }), ...patch };
     saveState();
   }
 
   // --------- DB ----------
   if (!dbUrl) throw new Error("DATABASE_URL vazio. Defina env DATABASE_URL.");
-  const pool = new Pool({ connectionString: dbUrl, max: 5, idleTimeoutMillis: 30_000 });
-  async function withConn(fn){ const c = await pool.connect(); try { return await fn(c); } finally { c.release(); } }
+  const pool = new Pool({
+    connectionString: dbUrl,
+    max: 5,
+    idleTimeoutMillis: 30_000
+  });
+  async function withConn(fn) {
+    const c = await pool.connect();
+    try { return await fn(c); } finally { c.release(); }
+  }
 
-  async function findAlunoByTelefone(c, telefone){
+  async function findAlunoByTelefone(c, telefone) {
     const q = `
       SELECT a.*
       FROM aluno a
@@ -66,47 +105,69 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     const { rows } = await c.query(q, [telefone]);
     return rows[0] || null;
   }
-  async function createAlunoComContato(c, { nome, prontuario, telefone }){
-    const a = await c.query(`INSERT INTO aluno (nome, prontuario, ativo) VALUES ($1,$2,true) RETURNING id`, [nome, prontuario]);
+  async function createAlunoComContato(c, { nome, prontuario, telefone }) {
+    const a = await c.query(
+      `INSERT INTO aluno (nome, prontuario, ativo) VALUES ($1,$2,true) RETURNING id`,
+      [nome, prontuario]
+    );
     const alunoId = a.rows[0].id;
-    await c.query(`INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`, [alunoId, telefone]);
+    await c.query(
+      `INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`,
+      [alunoId, telefone]
+    );
     return alunoId;
   }
-  async function setPreferenciasDias(c, alunoId, dias = []){
+  async function setPreferenciasDias(c, alunoId, dias = []) {
     await c.query(`DELETE FROM preferencia_dia WHERE aluno_id=$1`, [alunoId]);
     if (!dias.length) return;
-    const values = dias.map((d,i)=>`($1,$${i+2})`).join(",");
-    await c.query(`INSERT INTO preferencia_dia (aluno_id, dia_semana) VALUES ${values}`, [alunoId, ...dias]);
+    const values = dias.map((d, i) => `($1,$${i + 2})`).join(",");
+    await c.query(
+      `INSERT INTO preferencia_dia (aluno_id, dia_semana) VALUES ${values}`,
+      [alunoId, ...dias]
+    );
   }
-  async function addBloqueios(c, alunoId, nomes = []){
+  async function addBloqueios(c, alunoId, nomes = []) {
     for (const nome of nomes.map(strip).filter(Boolean)) {
       await c.query(
         `INSERT INTO prato_bloqueado (aluno_id, nome)
          SELECT $1, $2
          WHERE NOT EXISTS (
-           SELECT 1 FROM prato_bloqueado WHERE aluno_id=$1 AND lower(nome)=lower($2)
+           SELECT 1 FROM prato_bloqueado
+           WHERE aluno_id=$1 AND lower(nome)=lower($2)
          )`,
         [alunoId, nome]
       );
     }
   }
-  async function setAtivo(c, alunoId, ativo){
+  async function setAtivo(c, alunoId, ativo) {
     await c.query(`UPDATE aluno SET ativo=$2 WHERE id=$1`, [alunoId, !!ativo]);
   }
 
-  // --------- textos ----------
-  const helpText =
-    "Comandos:\n" +
-    "• *Cancelar* – cancelar o almoço (por enquanto só confirmamos o pedido de envio).\n" +
-    "• *Preferência* – escolher dias da semana (seg…sex).\n" +
-    "• *Bloquear* – informar pratos que você não come.\n" +
-    "• *Ativar* / *Desativar* – ligar/desligar seu cadastro.\n" +
-    "• *Ajuda* – ver este menu.";
+  // --------- textos de apoio ----------
+  function helpText(aluno) {
+    return (
+      header(aluno) +
+      "📋 *Menu principal*\n\n" +
+      "1️⃣ *Cancelar almoço*\n" +
+      "   → envie: *Cancelar*\n\n" +
+      "2️⃣ *Definir dias em que costuma almoçar no RU*\n" +
+      "   → envie: *Preferência*\n\n" +
+      "3️⃣ *Bloquear pratos que você não come*\n" +
+      "   → envie: *Bloquear*\n\n" +
+      "4️⃣ *Ativar / Desativar seu cadastro no sistema automático*\n" +
+      "   → envie: *Ativar* ou *Desativar*\n\n" +
+      "5️⃣ *Ver seu status cadastral*\n" +
+      "   → envie: *Status*\n\n" +
+      "Para ver esse menu de novo, envie: *Ajuda*."
+    );
+  }
 
   const ONBOARDING =
-    "Oi! Eu sou o robô que vai te ajudar a pedir seu almoço de forma automática. " +
-    "Se quiser começar, envie *CONTINUAR* e eu vou te cadastrar rapidinho. " +
-    "Depois disso, você poderá me dizer seus dias preferidos, horários e outras preferências!";
+    header(null) +
+    "🤖 Eu sou o *assistente automático do RU do IFSP Pirituba*.\n\n" +
+    "Posso te ajudar a *cancelar o almoço* dentro do prazo e a registrar as suas *preferências*.\n\n" +
+    "Para começar o cadastro, envie *CONTINUAR*.\n" +
+    "Se não quiser agora, pode voltar a qualquer momento enviando *Ajuda*.";
 
   // --------- handler principal ----------
   async function handleText(jid, textRaw) {
@@ -115,51 +176,112 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
     const u = getUser(jid);
     const phone = jidToPhone(jid);
+
     const aluno = await withConn(c => findAlunoByTelefone(c, phone));
-    if (aluno && !u.aluno_id) setUser(jid, { aluno_id: aluno.id, step: "MAIN", temp: {} });
+    if (aluno && !u.aluno_id) {
+      // se já existe no banco, coloca direto no MAIN
+      setUser(jid, { aluno_id: aluno.id, step: "MAIN", temp: {} });
+    }
 
     const n = norm(text);
 
     // atalhos globais
-    if (["ajuda","menu","help","comandos"].includes(n)) {
+    if (["ajuda", "menu", "help", "comandos"].includes(n)) {
       setUser(jid, { step: "MAIN", temp: {} });
-      return "✅ Aqui está o menu:\n" + helpText;
+      return helpText(aluno);
+    }
+
+    if (n === "status" || n === "meu status" || n === "cadastro") {
+      if (!aluno) {
+        return (
+          header(null) +
+          "📌 Seu número ainda *não está vinculado* a nenhum cadastro de aluno no sistema do RU do IFSP Pirituba.\n\n" +
+          "Para começar o cadastro, envie *CONTINUAR*."
+        );
+      }
+      return (
+        header(aluno) +
+        "📌 *Status do seu cadastro no sistema do RU (IFSP Pirituba)*\n\n" +
+        `• Nome: *${aluno.nome || "não informado"}*\n` +
+        `• Prontuário: *${aluno.prontuario || "não informado"}*\n` +
+        `• Cadastro ativo: *${aluno.ativo ? "Sim" : "Não"}*\n\n` +
+        "Você pode enviar *Ajuda* para ver o menu de comandos."
+      );
     }
 
     // ================= cadastro (ainda não existe no banco) =================
     if (!aluno) {
       // fast-forward do consentimento
-      if (["sim","s","ok","yes","continuar"].includes(n)) {
+      if (["sim", "s", "ok", "yes", "continuar"].includes(n)) {
         setUser(jid, { step: "ASK_NOME", temp: {} });
-        return "Perfeito! Como devo te chamar? (envie seu *nome completo*).";
+        return (
+          header(null) +
+          "📝 *Cadastro de aluno – IFSP Pirituba*\n\n" +
+          "Como devo te chamar?\n" +
+          "Envie seu *nome completo* como está no IFSP."
+        );
       }
 
       if (u.step === "NEW") {
         setUser(jid, { step: "ASK_CONSENT", temp: {} });
         return ONBOARDING;
       }
+
       if (u.step === "ASK_CONSENT") {
-        return "Sem problemas. Quando quiser começar, responda *CONTINUAR*.";
+        return (
+          header(null) +
+          "Tudo bem, sem problemas.\n\n" +
+          "Quando quiser começar o cadastro para usar o sistema automático do RU do IFSP Pirituba, basta responder *CONTINUAR*."
+        );
       }
+
       if (u.step === "ASK_NOME") {
-        if (text.length < 2) return "Nome muito curto. Envie seu *nome completo*.";
-        setUser(jid, { step: "ASK_PRONT", temp: { ...u.temp, nome: strip(text) } });
-        return "Agora envie seu *prontuário* (ex.: *3029701* ou *3X028702*).";
-      }
-      if (u.step === "ASK_PRONT") {
-        const pront = strip(text).toUpperCase().replace(/\s+/g,"");
-        // aceita A–Z e 0–9, 5 a 12 caracteres
-        if (!/^[A-Z0-9]{5,12}$/.test(pront)) {
-          return "Formato de prontuário inválido. Envie algo como *3029701* ou *3X028702* (5 a 12 caracteres, letras e números).";
+        if (text.length < 2) {
+          return (
+            header(null) +
+            "⚠️ Nome muito curto.\n" +
+            "Envie seu *nome completo* como está no cadastro do IFSP."
+          );
         }
-        // guarda prontuário, pede dias preferidos antes de concluir
-        setUser(jid, { step: "ASK_DIAS_REG", temp: { ...u.temp, prontuario: pront } });
-        return "Quais dias você costuma almoçar? Envie *seg, ter, qua, qui, sex* (separe por vírgulas).";
+        setUser(jid, { step: "ASK_PRONT", temp: { ...u.temp, nome: strip(text) } });
+        return (
+          header(null) +
+          "✅ *Nome recebido!*\n\n" +
+          "Agora envie seu *prontuário IFSP* (ex.: *3029701* ou *3X028702*).\n" +
+          "Aceitamos de 5 a 12 caracteres com letras e números."
+        );
       }
+
+      if (u.step === "ASK_PRONT") {
+        const pront = strip(text).toUpperCase().replace(/\s+/g, "");
+        if (!/^[A-Z0-9]{5,12}$/.test(pront)) {
+          return (
+            header(null) +
+            "⚠️ *Formato de prontuário inválido.*\n\n" +
+            "Envie algo como *3029701* ou *3X028702*.\n" +
+            "Use apenas letras e números (5 a 12 caracteres)."
+          );
+        }
+        setUser(jid, { step: "ASK_DIAS_REG", temp: { ...u.temp, prontuario: pront } });
+        return (
+          header(null) +
+          "✅ *Prontuário registrado!*\n\n" +
+          "Para finalizar seu cadastro no sistema do RU do IFSP Pirituba:\n" +
+          "Quais dias você *costuma almoçar* no câmpus?\n\n" +
+          "Envie algo como: *seg, ter, qua, qui, sex*."
+        );
+      }
+
       if (u.step === "ASK_DIAS_REG") {
         const dias = parseDiasLista(text);
-        if (!dias.length) return "Não entendi os dias. Envie algo como: *seg, qua, sex*.";
-        // cria no banco + salva dias
+        if (!dias.length) {
+          return (
+            header(null) +
+            "⚠️ Não entendi os dias.\n\n" +
+            "Exemplos válidos: *seg, qua, sex* ou *segunda, terça, quinta*."
+          );
+        }
+
         const alunoId = await withConn(async c => {
           const id = await createAlunoComContato(c, {
             nome: u.temp.nome,
@@ -169,75 +291,199 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           await setPreferenciasDias(c, id, dias);
           return id;
         });
+
         setUser(jid, { step: "MAIN", temp: {}, aluno_id: alunoId });
-        return "✅ Cadastro concluído!\nSeu número foi salvo no sistema.\n\n" + helpText;
+
+        return (
+          header({ nome: u.temp.nome, prontuario: u.temp.prontuario, ativo: true }) +
+          "✅ *Cadastro concluído no sistema do RU (IFSP Pirituba)!*\n\n" +
+          `Dias preferidos registrados: *${diasHumanos(dias)}*.\n\n` +
+          "A partir de agora, você pode:\n" +
+          "• Enviar *Cancelar* para registrar pedido de cancelamento de almoço.\n" +
+          "• Enviar *Preferência* para alterar os dias.\n" +
+          "• Enviar *Bloquear* para registrar pratos que não come.\n\n" +
+          "Envie *Ajuda* para ver o menu completo."
+        );
       }
-      // fallback
+
+      // fallback enquanto não cadastrado
       return ONBOARDING;
     }
 
     // ================= aluno já conhecido =================
+    // atualiza header sempre com aluno real
+    const alunoAtual = aluno;
+
     if (u.step === "SET_DIAS") {
       const dias = parseDiasLista(text);
-      if (!dias.length) return "Não entendi os dias. Envie algo como: *seg, qua, sex*.";
-      await withConn(c => setPreferenciasDias(c, aluno.id, dias));
-      setUser(jid, { step: "MAIN", temp: {} });
-      return `Preferências atualizadas: ${diasHumanos(dias)} ✅`;
-    }
-    if (u.step === "SET_BLOQ") {
-      const itens = text.split(/[,;\n]+/).map(strip).filter(Boolean);
-      if (!itens.length) return "Envie os pratos separados por vírgula (ex.: *carne moída, estrogonofe*).";
-      await withConn(c => addBloqueios(c, aluno.id, itens));
-      setUser(jid, { step: "MAIN", temp: {} });
-      return `Bloqueios salvos: ${itens.join(", ")} ✅`;
-    }
-    if (u.step === "CONFIRM_CANCEL") {
-      if (["sim","s","ok","yes","confirmar","confirmo"].includes(n)) {
-        const d = new Date(u.temp?.cancelDate || new Date());
-        const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
-        setUser(jid, { step: "MAIN", temp: {} });
-        // v0: só confirma o pedido; (hook de e-mail pode ser plugado aqui depois)
-        return `✅ Pedido registrado: enviaremos à CAE o cancelamento do almoço de *${alvo}* com o prontuário *${aluno.prontuario}*.`;
+      if (!dias.length) {
+        return (
+          header(alunoAtual) +
+          "⚠️ Não entendi os dias.\n\n" +
+          "Envie algo como: *seg, qua, sex* ou *segunda, terça, quinta*."
+        );
       }
-      if (["nao","não","n","cancelar","voltar","parar"].includes(n)) {
-        setUser(jid, { step: "MAIN", temp: {} });
-        return "Beleza, não vou cancelar. Digite *Ajuda* para opções.";
-      }
-      // repete a confirmação se vier algo diferente
-      const d = new Date(u.temp?.cancelDate || new Date());
-      const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
-      return `Só para confirmar: deseja que eu envie à CAE o cancelamento do almoço de *${alvo}* usando seu prontuário *${aluno.prontuario}*? Responda *SIM* para confirmar ou *NÃO* para voltar.`;
-    }
-
-    // intenções
-    if (n.startsWith("cancelar") || n === "nao vou" || n === "nao vou almocar" || n === "não vou" || n === "não vou almoçar") {
-      const alvoDate = diaCancelamentoAlvo(new Date());
-      setUser(jid, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate } });
-      const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
+      await withConn(c => setPreferenciasDias(c, alunoAtual.id, dias));
+      setUser(jid, { step: "MAIN", temp: {} });
       return (
-        `Pela regra do RU: até *13:15* você cancela *o almoço de hoje*; depois disso, vale para *amanhã*.\n\n` +
-        `Você quer que eu envie à *CAE* um e-mail de cancelamento do almoço de *${alvo}* ` +
-        `usando o seu prontuário *${aluno.prontuario}*? Responda *SIM* para confirmar ou *NÃO* para voltar.`
+        header(alunoAtual) +
+        "✅ *Preferências de dias atualizadas!*\n\n" +
+        `Dias cadastrados para o RU do IFSP Pirituba: *${diasHumanos(dias)}*.\n\n` +
+        "Você pode enviar *Ajuda* para voltar ao menu."
       );
     }
 
-    if (n.startsWith("preferencia") || n === "preferencias" || n === "dia" || n === "dias") {
+    if (u.step === "SET_BLOQ") {
+      const itens = text.split(/[,;\n]+/).map(strip).filter(Boolean);
+      if (!itens.length) {
+        return (
+          header(alunoAtual) +
+          "⚠️ Não encontrei nenhum prato.\n\n" +
+          "Envie os *pratos* que deseja bloquear, separados por vírgula.\n" +
+          "Ex.: *carne moída, estrogonofe*."
+        );
+      }
+      await withConn(c => addBloqueios(c, alunoAtual.id, itens));
+      setUser(jid, { step: "MAIN", temp: {} });
+      return (
+        header(alunoAtual) +
+        "✅ *Bloqueios salvos!*\n\n" +
+        `Pratos bloqueados: *${itens.join(", ")}*.\n\n` +
+        "Essas informações são usadas quando formos montar seus pedidos para o RU do IFSP Pirituba.\n\n" +
+        "Envie *Ajuda* para voltar ao menu."
+      );
+    }
+
+    if (u.step === "CONFIRM_CANCEL") {
+      const d = new Date(u.temp?.cancelDate || new Date());
+      const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
+
+      if (["sim", "s", "ok", "yes", "confirmar", "confirmo"].includes(n)) {
+        setUser(jid, { step: "MAIN", temp: {} });
+        return (
+          header(alunoAtual) +
+          "✅ *Pedido de cancelamento registrado!*\n\n" +
+          `Será enviado um registro de cancelamento do *almoço de ${alvo}* ` +
+          `para a *CAE / RU do IFSP Pirituba*, usando o seu prontuário *${alunoAtual.prontuario}*.\n\n` +
+          "Guarde esta mensagem como comprovante.\n" +
+          "Você pode enviar *Status* para ver seus dados ou *Ajuda* para o menu."
+        );
+      }
+
+      if (["nao", "não", "n", "cancelar", "voltar", "parar"].includes(n)) {
+        setUser(jid, { step: "MAIN", temp: {} });
+        return (
+          header(alunoAtual) +
+          "👍 Beleza, não vou registrar nenhum cancelamento.\n\n" +
+          "Se quiser cancelar depois, envie *Cancelar*.\n" +
+          "Para ver opções, envie *Ajuda*."
+        );
+      }
+
+      // se mandou algo aleatório, repete a confirmação
+      return (
+        header(alunoAtual) +
+        "Só para confirmar:\n\n" +
+        `Você deseja que eu registre o *cancelamento do almoço de ${alvo}* ` +
+        `no RU do IFSP Pirituba usando o seu prontuário *${alunoAtual.prontuario}*?\n\n` +
+        "Responda *SIM* para confirmar ou *NÃO* para voltar."
+      );
+    }
+
+    // intenções principais
+    if (
+      n.startsWith("cancelar") ||
+      n === "nao vou" ||
+      n === "nao vou almocar" ||
+      n === "não vou" ||
+      n === "não vou almoçar"
+    ) {
+      const alvoDate = diaCancelamentoAlvo(new Date());
+      const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
+      setUser(jid, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate } });
+
+      return (
+        header(alunoAtual) +
+        "📆 *Cancelamento de almoço – RU IFSP Pirituba*\n\n" +
+        "Pela regra do RU do câmpus Pirituba:\n" +
+        "• Até *13:15* você cancela *o almoço de hoje*.\n" +
+        "• Depois de *13:15*, o cancelamento vale para *amanhã*.\n\n" +
+        `Agora, pela hora atual, o alvo é: *${alvo}*.\n\n` +
+        `Você quer que eu registre o cancelamento do almoço de *${alvo}* ` +
+        `usando o seu prontuário *${alunoAtual.prontuario}*?\n\n` +
+        "Responda *SIM* para confirmar ou *NÃO* para voltar."
+      );
+    }
+
+    if (
+      n.startsWith("preferencia") ||
+      n === "preferencias" ||
+      n === "dia" ||
+      n === "dias"
+    ) {
       setUser(jid, { step: "SET_DIAS", temp: {} });
-      return "Quais dias você costuma almoçar? Envie *seg, ter, qua, qui, sex* (separe por vírgulas).";
+      return (
+        header(alunoAtual) +
+        "🗓️ *Atualizar dias em que você costuma almoçar no RU (IFSP Pirituba)*\n\n" +
+        "Envie os dias da semana que normalmente você almoça no câmpus.\n" +
+        "Exemplos: *seg, ter, qua, qui, sex* ou *segunda, terça, quinta*."
+      );
     }
 
-    if (n.startsWith("bloquear") || n.includes("nao como") || n.includes("não como") || n.includes("alergia")) {
+    if (
+      n.startsWith("bloquear") ||
+      n.includes("nao como") ||
+      n.includes("não como") ||
+      n.includes("alergia")
+    ) {
       setUser(jid, { step: "SET_BLOQ", temp: {} });
-      return "Envie os *pratos* que deseja bloquear, separados por vírgula. Ex.: *frango xadrez, feijoada*";
+      return (
+        header(alunoAtual) +
+        "🍽️ *Bloquear pratos no sistema do RU (IFSP Pirituba)*\n\n" +
+        "Envie os *pratos* que você não come / tem alergia / prefere evitar,\n" +
+        "separados por vírgula. Ex.: *frango xadrez, feijoada*."
+      );
     }
 
-    if (n === "ativar") { await withConn(c => setAtivo(c, aluno.id, true)); return "Cadastro *ativado* ✅"; }
-    if (n === "desativar" || n === "pausar") { await withConn(c => setAtivo(c, aluno.id, false)); return "Cadastro *desativado* (você pode enviar *Ativar* quando quiser voltar)."; }
-    if (n === "cadastrar") return "Seu número *já está cadastrado*. Digite *Ajuda* para ver os comandos.";
+    if (n === "ativar") {
+      await withConn(c => setAtivo(c, alunoAtual.id, true));
+      return (
+        header({ ...alunoAtual, ativo: true }) +
+        "✅ Seu cadastro no sistema automático do RU do IFSP Pirituba foi *ativado*.\n\n" +
+        "Você continuará recebendo as ações baseadas nas suas preferências.\n" +
+        "Envie *Ajuda* para ver o menu."
+      );
+    }
 
-    return "Não entendi. Digite *Ajuda* para ver os comandos.";
+    if (n === "desativar" || n === "pausar") {
+      await withConn(c => setAtivo(c, alunoAtual.id, false));
+      return (
+        header({ ...alunoAtual, ativo: false }) +
+        "⏸️ Seu cadastro no sistema automático do RU do IFSP Pirituba foi *desativado*.\n\n" +
+        "Você pode enviar *Ativar* quando quiser voltar.\n" +
+        "Envie *Ajuda* para ver o menu."
+      );
+    }
+
+    if (n === "cadastrar") {
+      return (
+        header(alunoAtual) +
+        "✅ Seu número já está *cadastrado* no sistema do RU do IFSP Pirituba.\n\n" +
+        "Envie *Ajuda* para ver o menu de comandos."
+      );
+    }
+
+    // fallback padrão
+    return (
+      header(alunoAtual) +
+      "Não entendi seu comando.\n\n" +
+      "Envie *Ajuda* para ver o menu de opções do assistente do RU do IFSP Pirituba."
+    );
   }
 
-  async function close(){ try { await pool.end(); } catch {} }
+  async function close() {
+    try { await pool.end(); } catch { }
+  }
+
   return { handleText, close };
 }
