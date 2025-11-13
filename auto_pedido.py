@@ -5,11 +5,6 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import psycopg
 
-# === Twilio Sandbox (WhatsApp) ===
-TWILIO_ACCOUNT_SID = os.getenv('TWILIO_ACCOUNT_SID')
-TWILIO_AUTH_TOKEN  = os.getenv('TWILIO_AUTH_TOKEN')
-TWILIO_FROM        = os.getenv('TWILIO_FROM', 'whatsapp:+14155238886')
-ADMINS_E164        = [s.strip() for s in os.getenv('ADMINS_E164', '').split(',') if s.strip()]
 
 # === Config geral ===
 URL_HOME    = 'http://200.133.203.133/home'
@@ -61,36 +56,6 @@ def send_email(subject: str, body: str):
         smtp.send_message(msg)
 
 # --------------------- WhatsApp via Twilio -------------------------
-def send_whatsapp_text_twilio(to_e164: str, body: str):
-    """
-    Envia texto via Twilio WhatsApp Sandbox.
-    Requer:
-      - to_e164 no formato +5511..., e já 'join' no sandbox.
-      - TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN configurados.
-    """
-    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
-        logging.warning('TWILIO_* não configurados; alerta WhatsApp suprimido.')
-        return
-
-    # Normaliza destino: "+55119..." -> "whatsapp:+55119..."
-    to_e164 = (to_e164 or "").strip()
-    if not to_e164:
-        logging.error("Destino vazio para WhatsApp")
-        return
-    if not to_e164.startswith('+'):
-        to_e164 = '+' + to_e164
-    to_full = f'whatsapp:{to_e164}'
-
-    url  = f'https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json'
-    auth = base64.b64encode(f'{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}'.encode()).decode()
-    data = {'From': TWILIO_FROM, 'To': to_full, 'Body': body[:1600]}
-
-    try:
-        r = requests.post(url, data=data, headers={'Authorization': f'Basic {auth}'}, timeout=15)
-        if not r.ok:
-            logging.error('Falha Twilio %s: %s', r.status_code, r.text)
-    except Exception as e:
-        logging.exception('Exceção no envio WhatsApp (Twilio): %s', e)
 
 
 # --------------------------- Dados ---------------------------------
@@ -284,9 +249,6 @@ def main():
         
         fim = datetime.now(TZ).strftime('%H:%M:%S')
         detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
-
-    fim = datetime.now(TZ).strftime('%H:%M:%S')
-    detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
     
     if sucesso:
         motivo = f'PEDIU_OK: {mensagem}'
@@ -324,8 +286,7 @@ def main():
         if restantes > 0:
             corpo.append(f'… (+{restantes} falhas adicionais)')
         resumo = '\n'.join(corpo)
-        for admin in ADMINS_E164:
-            send_whatsapp_text_twilio(admin, resumo)
+
 
 if __name__ == '__main__':
     main()
