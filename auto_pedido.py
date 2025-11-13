@@ -266,24 +266,24 @@ def main():
             continue
 
           # Tentativa de pedido
-          time.sleep(random.randint(0, JITTER_MAX))
-          inicio = datetime.now(TZ).strftime('%H:%M:%S')
-          
-          sucesso, mensagem = False, ''
-          tentativa = 0
-          for tentativa in range(1, TENTATIVAS + 1):
-              try:
-                  r = enviar_prontuario(sess, pront)
-                  sucesso, mensagem = parse_feedback(r.text)
-                  if sucesso:
-                      break
-                  raise ValueError(mensagem)
-              except Exception as e:
-                  mensagem = str(e)
-                  time.sleep(RETRY_SEC)
-          
-          fim = datetime.now(TZ).strftime('%H:%M:%S')
-          detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
+        time.sleep(random.randint(0, JITTER_MAX))
+        inicio = datetime.now(TZ).strftime('%H:%M:%S')
+        
+        sucesso, mensagem = False, ''
+        tentativa = 0
+        for tentativa in range(1, TENTATIVAS + 1):
+            try:
+                r = enviar_prontuario(sess, pront)
+                sucesso, mensagem = parse_feedback(r.text)
+                if sucesso:
+                    break
+                raise ValueError(mensagem)
+            except Exception as e:
+                mensagem = str(e)
+                time.sleep(RETRY_SEC)
+        
+        fim = datetime.now(TZ).strftime('%H:%M:%S')
+        detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
 
     fim = datetime.now(TZ).strftime('%H:%M:%S')
     detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
