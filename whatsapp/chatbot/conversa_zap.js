@@ -16,6 +16,7 @@ const {
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers,
+  isJidGroup, 
   extractMessageContent,
   jidNormalizedUser,
   getContentType
@@ -260,6 +261,12 @@ async function startWA() {
         let jid = m.key?.remoteJid || "";
         if (!jid || jid.endsWith("@status")) continue;
         jid = jidNormalizedUser(jid);
+
+        // IGNORA GRUPOS / BROADCAST / STATUS
+        if (isJidGroup(jid) || isJidBroadcast(jid) || isJidStatusBroadcast(jid)) {
+          logger.info({ jid }, "Ignorando chat não-privado");
+          continue;
+        }
 
         const ct = getContentType(m.message);
         logger.info({ type, fromMe, jid, ct }, "RX upsert");
