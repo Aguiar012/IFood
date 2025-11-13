@@ -27,6 +27,7 @@ function parseDiasLista(txt = "") {
   for (const it of itens) if (map[it] != null) dias.add(map[it]);
   return [...dias].sort((a, b) => a - b);
 }
+
 function diasHumanos(dias = []) {
   const mapInv = { 1: "Seg", 2: "Ter", 3: "Qua", 4: "Qui", 5: "Sex", 6: "Sáb", 7: "Dom" };
   return (dias || []).map(d => mapInv[d] || d).join(", ");
@@ -34,22 +35,26 @@ function diasHumanos(dias = []) {
 
 // ---- datas / cutoff 13:15 ----
 const DIA_LONGO = ["Domingo", "Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado"];
+
 function ddmm(d) {
   const x = new Date(d);
   const dd = String(x.getDate()).padStart(2, "0");
   const mm = String(x.getMonth() + 1).padStart(2, "0");
   return `${dd}/${mm}`;
 }
+
 function addDays(d, n) {
   const x = new Date(d);
   x.setDate(x.getDate() + n);
   return x;
 }
+
 function cutoff1315(dt) {
   const x = new Date(dt);
   x.setHours(13, 15, 0, 0);
   return x;
 }
+
 function diaCancelamentoAlvo(now = new Date()) {
   // <= 13:15 → hoje; > 13:15 → amanhã
   return (now <= cutoff1315(now)) ? now : addDays(now, 1);
@@ -57,12 +62,20 @@ function diaCancelamentoAlvo(now = new Date()) {
 
 // ---- header / identidade visual ----
 function header(aluno) {
-  const base = "🟢 *IFSP Pirituba | Assistente do RU*\n";
-  if (!aluno) return base + "--------------------------------\n";
+  const titulo = "IFSP Pirituba | Assistente de Almoço\n";
+  if (!aluno) {
+    return (
+      titulo +
+      "Você está falando com o robô que ajuda no sistema de pedidos de almoço do câmpus.\n" +
+      "--------------------------------\n"
+    );
+  }
   const pront = aluno.prontuario || "não informado";
+  const nome = aluno.nome || "Aluno";
   return (
-    base +
-    `👤 ${aluno.nome || "Aluno"}  |  🎓 Prontuário: *${pront}*\n` +
+    titulo +
+    `Aluno: ${nome}\n` +
+    `Prontuário: ${pront}\n` +
     "--------------------------------\n"
   );
 }
@@ -72,12 +85,15 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   const STORE_FILE = path.join(dataDir, "conversa_flow_state.json");
   let state = {};
   try { state = JSON.parse(fs.readFileSync(STORE_FILE, "utf8")); } catch { state = {}; }
+
   function saveState() {
     try { fs.writeFileSync(STORE_FILE, JSON.stringify(state)); } catch { }
   }
+
   function getUser(jid) {
     return state[jid] || (state[jid] = { step: "NEW", temp: {} });
   }
+
   function setUser(jid, patch) {
     state[jid] = { ...(state[jid] || { step: "NEW", temp: {} }), ...patch };
     saveState();
@@ -90,6 +106,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     max: 5,
     idleTimeoutMillis: 30_000
   });
+
   async function withConn(fn) {
     const c = await pool.connect();
     try { return await fn(c); } finally { c.release(); }
@@ -105,6 +122,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     const { rows } = await c.query(q, [telefone]);
     return rows[0] || null;
   }
+
   async function createAlunoComContato(c, { nome, prontuario, telefone }) {
     const a = await c.query(
       `INSERT INTO aluno (nome, prontuario, ativo) VALUES ($1,$2,true) RETURNING id`,
@@ -117,6 +135,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     );
     return alunoId;
   }
+
   async function setPreferenciasDias(c, alunoId, dias = []) {
     await c.query(`DELETE FROM preferencia_dia WHERE aluno_id=$1`, [alunoId]);
     if (!dias.length) return;
@@ -126,6 +145,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       [alunoId, ...dias]
     );
   }
+
   async function addBloqueios(c, alunoId, nomes = []) {
     for (const nome of nomes.map(strip).filter(Boolean)) {
       await c.query(
@@ -139,6 +159,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       );
     }
   }
+
   async function setAtivo(c, alunoId, ativo) {
     await c.query(`UPDATE aluno SET ativo=$2 WHERE id=$1`, [alunoId, !!ativo]);
   }
@@ -147,26 +168,21 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   function helpText(aluno) {
     return (
       header(aluno) +
-      "📋 *Menu principal*\n\n" +
-      "1️⃣ *Cancelar almoço*\n" +
-      "   → envie: *Cancelar*\n\n" +
-      "2️⃣ *Definir dias em que costuma almoçar no RU*\n" +
-      "   → envie: *Preferência*\n\n" +
-      "3️⃣ *Bloquear pratos que você não come*\n" +
-      "   → envie: *Bloquear*\n\n" +
-      "4️⃣ *Ativar / Desativar seu cadastro no sistema automático*\n" +
-      "   → envie: *Ativar* ou *Desativar*\n\n" +
-      "5️⃣ *Ver seu status cadastral*\n" +
-      "   → envie: *Status*\n\n" +
+      "Menu principal\n\n" +
+      "• *Cancelar*  → registrar cancelamento de almoço\n" +
+      "• *Preferência*  → escolher dias em que você costuma almoçar no câmpus\n" +
+      "• *Bloquear*  → informar pratos que você não come / quer evitar\n" +
+      "• *Ativar* / *Desativar*  → ligar ou pausar seu cadastro\n" +
+      "• *Status*  → ver seus dados no sistema\n\n" +
       "Para ver esse menu de novo, envie: *Ajuda*."
     );
   }
 
   const ONBOARDING =
     header(null) +
-    "🤖 Eu sou o *assistente automático do RU do IFSP Pirituba*.\n\n" +
-    "Posso te ajudar a *cancelar o almoço* dentro do prazo e a registrar as suas *preferências*.\n\n" +
-    "Para começar o cadastro, envie *CONTINUAR*.\n" +
+    "Eu ajudo a registrar cancelamento de almoço e preferências (dias e pratos)\n" +
+    "no sistema de pedidos de almoço do câmpus Pirituba.\n\n" +
+    "Pra começar o cadastro, envie: *CONTINUAR*.\n" +
     "Se não quiser agora, pode voltar a qualquer momento enviando *Ajuda*.";
 
   // --------- handler principal ----------
@@ -179,7 +195,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
     const aluno = await withConn(c => findAlunoByTelefone(c, phone));
     if (aluno && !u.aluno_id) {
-      // se já existe no banco, coloca direto no MAIN
       setUser(jid, { aluno_id: aluno.id, step: "MAIN", temp: {} });
     }
 
@@ -188,24 +203,24 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     // atalhos globais
     if (["ajuda", "menu", "help", "comandos"].includes(n)) {
       setUser(jid, { step: "MAIN", temp: {} });
-      return helpText(aluno);
+      return helpText(aluno || null);
     }
 
     if (n === "status" || n === "meu status" || n === "cadastro") {
       if (!aluno) {
         return (
           header(null) +
-          "📌 Seu número ainda *não está vinculado* a nenhum cadastro de aluno no sistema do RU do IFSP Pirituba.\n\n" +
-          "Para começar o cadastro, envie *CONTINUAR*."
+          "Seu número ainda *não está vinculado* a nenhum cadastro de aluno no sistema de almoço do IFSP Pirituba.\n\n" +
+          "Pra começar o cadastro, envie: *CONTINUAR*."
         );
       }
       return (
         header(aluno) +
-        "📌 *Status do seu cadastro no sistema do RU (IFSP Pirituba)*\n\n" +
+        "*Status do seu cadastro*\n\n" +
         `• Nome: *${aluno.nome || "não informado"}*\n` +
         `• Prontuário: *${aluno.prontuario || "não informado"}*\n` +
         `• Cadastro ativo: *${aluno.ativo ? "Sim" : "Não"}*\n\n` +
-        "Você pode enviar *Ajuda* para ver o menu de comandos."
+        "Envie *Ajuda* para ver o menu de comandos."
       );
     }
 
@@ -216,7 +231,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         setUser(jid, { step: "ASK_NOME", temp: {} });
         return (
           header(null) +
-          "📝 *Cadastro de aluno – IFSP Pirituba*\n\n" +
+          "*Cadastro de aluno – IFSP Pirituba*\n\n" +
           "Como devo te chamar?\n" +
           "Envie seu *nome completo* como está no IFSP."
         );
@@ -230,8 +245,9 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       if (u.step === "ASK_CONSENT") {
         return (
           header(null) +
-          "Tudo bem, sem problemas.\n\n" +
-          "Quando quiser começar o cadastro para usar o sistema automático do RU do IFSP Pirituba, basta responder *CONTINUAR*."
+          "Tranquilo, sem problemas.\n\n" +
+          "Quando você quiser usar o sistema automático de pedidos de almoço do IFSP Pirituba,\n" +
+          "basta responder *CONTINUAR*."
         );
       }
 
@@ -239,14 +255,14 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         if (text.length < 2) {
           return (
             header(null) +
-            "⚠️ Nome muito curto.\n" +
+            "Nome muito curto.\n" +
             "Envie seu *nome completo* como está no cadastro do IFSP."
           );
         }
         setUser(jid, { step: "ASK_PRONT", temp: { ...u.temp, nome: strip(text) } });
         return (
           header(null) +
-          "✅ *Nome recebido!*\n\n" +
+          "*Nome recebido!*\n\n" +
           "Agora envie seu *prontuário IFSP* (ex.: *3029701* ou *3X028702*).\n" +
           "Aceitamos de 5 a 12 caracteres com letras e números."
         );
@@ -257,7 +273,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         if (!/^[A-Z0-9]{5,12}$/.test(pront)) {
           return (
             header(null) +
-            "⚠️ *Formato de prontuário inválido.*\n\n" +
+            "*Formato de prontuário inválido.*\n\n" +
             "Envie algo como *3029701* ou *3X028702*.\n" +
             "Use apenas letras e números (5 a 12 caracteres)."
           );
@@ -265,9 +281,9 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         setUser(jid, { step: "ASK_DIAS_REG", temp: { ...u.temp, prontuario: pront } });
         return (
           header(null) +
-          "✅ *Prontuário registrado!*\n\n" +
-          "Para finalizar seu cadastro no sistema do RU do IFSP Pirituba:\n" +
-          "Quais dias você *costuma almoçar* no câmpus?\n\n" +
+          "*Prontuário registrado!*\n\n" +
+          "Pra finalizar seu cadastro no sistema automático de pedidos do IFSP Pirituba:\n" +
+          "quais dias você *costuma almoçar* no câmpus?\n\n" +
           "Envie algo como: *seg, ter, qua, qui, sex*."
         );
       }
@@ -277,7 +293,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         if (!dias.length) {
           return (
             header(null) +
-            "⚠️ Não entendi os dias.\n\n" +
+            "Não entendi os dias.\n\n" +
             "Exemplos válidos: *seg, qua, sex* ou *segunda, terça, quinta*."
           );
         }
@@ -294,9 +310,15 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
         setUser(jid, { step: "MAIN", temp: {}, aluno_id: alunoId });
 
+        const alunoFake = {
+          nome: u.temp.nome,
+          prontuario: u.temp.prontuario,
+          ativo: true
+        };
+
         return (
-          header({ nome: u.temp.nome, prontuario: u.temp.prontuario, ativo: true }) +
-          "✅ *Cadastro concluído no sistema do RU (IFSP Pirituba)!*\n\n" +
+          header(alunoFake) +
+          "*Cadastro concluído no sistema automático de pedidos (IFSP Pirituba).* \n\n" +
           `Dias preferidos registrados: *${diasHumanos(dias)}*.\n\n` +
           "A partir de agora, você pode:\n" +
           "• Enviar *Cancelar* para registrar pedido de cancelamento de almoço.\n" +
@@ -311,7 +333,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     }
 
     // ================= aluno já conhecido =================
-    // atualiza header sempre com aluno real
     const alunoAtual = aluno;
 
     if (u.step === "SET_DIAS") {
@@ -319,7 +340,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       if (!dias.length) {
         return (
           header(alunoAtual) +
-          "⚠️ Não entendi os dias.\n\n" +
+          "Não entendi os dias.\n\n" +
           "Envie algo como: *seg, qua, sex* ou *segunda, terça, quinta*."
         );
       }
@@ -327,9 +348,9 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       setUser(jid, { step: "MAIN", temp: {} });
       return (
         header(alunoAtual) +
-        "✅ *Preferências de dias atualizadas!*\n\n" +
-        `Dias cadastrados para o RU do IFSP Pirituba: *${diasHumanos(dias)}*.\n\n` +
-        "Você pode enviar *Ajuda* para voltar ao menu."
+        "*Preferências de dias atualizadas!*\n\n" +
+        `Dias cadastrados para o refeitório do câmpus Pirituba: *${diasHumanos(dias)}*.\n\n` +
+        "Envie *Ajuda* para voltar ao menu."
       );
     }
 
@@ -338,7 +359,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       if (!itens.length) {
         return (
           header(alunoAtual) +
-          "⚠️ Não encontrei nenhum prato.\n\n" +
+          "Não encontrei nenhum prato na sua mensagem.\n\n" +
           "Envie os *pratos* que deseja bloquear, separados por vírgula.\n" +
           "Ex.: *carne moída, estrogonofe*."
         );
@@ -347,9 +368,10 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       setUser(jid, { step: "MAIN", temp: {} });
       return (
         header(alunoAtual) +
-        "✅ *Bloqueios salvos!*\n\n" +
+        "*Bloqueios salvos!*\n\n" +
         `Pratos bloqueados: *${itens.join(", ")}*.\n\n` +
-        "Essas informações são usadas quando formos montar seus pedidos para o RU do IFSP Pirituba.\n\n" +
+        "Essas informações serão usadas quando formos montar seus pedidos\n" +
+        "no sistema automático de almoço do IFSP Pirituba.\n\n" +
         "Envie *Ajuda* para voltar ao menu."
       );
     }
@@ -362,11 +384,11 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         setUser(jid, { step: "MAIN", temp: {} });
         return (
           header(alunoAtual) +
-          "✅ *Pedido de cancelamento registrado!*\n\n" +
-          `Será enviado um registro de cancelamento do *almoço de ${alvo}* ` +
-          `para a *CAE / RU do IFSP Pirituba*, usando o seu prontuário *${alunoAtual.prontuario}*.\n\n` +
+          "*Pedido de cancelamento registrado.*\n\n" +
+          `Almoço de *${alvo}* marcado para cancelamento junto à CAE do IFSP Pirituba,\n` +
+          `usando o seu prontuário *${alunoAtual.prontuario}*.\n\n` +
           "Guarde esta mensagem como comprovante.\n" +
-          "Você pode enviar *Status* para ver seus dados ou *Ajuda* para o menu."
+          "Envie *Status* para ver seus dados ou *Ajuda* para o menu."
         );
       }
 
@@ -374,18 +396,18 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         setUser(jid, { step: "MAIN", temp: {} });
         return (
           header(alunoAtual) +
-          "👍 Beleza, não vou registrar nenhum cancelamento.\n\n" +
+          "Beleza, não vou registrar nenhum cancelamento agora.\n\n" +
           "Se quiser cancelar depois, envie *Cancelar*.\n" +
-          "Para ver opções, envie *Ajuda*."
+          "Envie *Ajuda* para ver as opções."
         );
       }
 
       // se mandou algo aleatório, repete a confirmação
       return (
         header(alunoAtual) +
-        "Só para confirmar:\n\n" +
+        "Só pra confirmar:\n\n" +
         `Você deseja que eu registre o *cancelamento do almoço de ${alvo}* ` +
-        `no RU do IFSP Pirituba usando o seu prontuário *${alunoAtual.prontuario}*?\n\n` +
+        `na CAE do IFSP Pirituba usando o seu prontuário *${alunoAtual.prontuario}*?\n\n` +
         "Responda *SIM* para confirmar ou *NÃO* para voltar."
       );
     }
@@ -404,13 +426,12 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
       return (
         header(alunoAtual) +
-        "📆 *Cancelamento de almoço – RU IFSP Pirituba*\n\n" +
-        "Pela regra do RU do câmpus Pirituba:\n" +
-        "• Até *13:15* você cancela *o almoço de hoje*.\n" +
-        "• Depois de *13:15*, o cancelamento vale para *amanhã*.\n\n" +
-        `Agora, pela hora atual, o alvo é: *${alvo}*.\n\n` +
-        `Você quer que eu registre o cancelamento do almoço de *${alvo}* ` +
-        `usando o seu prontuário *${alunoAtual.prontuario}*?\n\n` +
+        "Cancelamento de almoço\n\n" +
+        "Regras da CAE (almoço):\n" +
+        "• Até *13:15*: cancela o almoço de *hoje*.\n" +
+        "• Depois de *13:15*: cancela o almoço de *amanhã*.\n\n" +
+        `Pela hora atual, o alvo é: *${alvo}*.\n\n` +
+        `Confirmar cancelamento desse almoço usando seu prontuário *${alunoAtual.prontuario}*?\n\n` +
         "Responda *SIM* para confirmar ou *NÃO* para voltar."
       );
     }
@@ -424,7 +445,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       setUser(jid, { step: "SET_DIAS", temp: {} });
       return (
         header(alunoAtual) +
-        "🗓️ *Atualizar dias em que você costuma almoçar no RU (IFSP Pirituba)*\n\n" +
+        "Atualizar dias em que você costuma almoçar\n\n" +
         "Envie os dias da semana que normalmente você almoça no câmpus.\n" +
         "Exemplos: *seg, ter, qua, qui, sex* ou *segunda, terça, quinta*."
       );
@@ -439,7 +460,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       setUser(jid, { step: "SET_BLOQ", temp: {} });
       return (
         header(alunoAtual) +
-        "🍽️ *Bloquear pratos no sistema do RU (IFSP Pirituba)*\n\n" +
+        "Bloquear pratos no sistema\n\n" +
         "Envie os *pratos* que você não come / tem alergia / prefere evitar,\n" +
         "separados por vírgula. Ex.: *frango xadrez, feijoada*."
       );
@@ -449,8 +470,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       await withConn(c => setAtivo(c, alunoAtual.id, true));
       return (
         header({ ...alunoAtual, ativo: true }) +
-        "✅ Seu cadastro no sistema automático do RU do IFSP Pirituba foi *ativado*.\n\n" +
-        "Você continuará recebendo as ações baseadas nas suas preferências.\n" +
+        "Seu cadastro no sistema automático de almoço do IFSP Pirituba foi *ativado*.\n\n" +
+        "Você continuará recebendo as ações com base nas suas preferências.\n" +
         "Envie *Ajuda* para ver o menu."
       );
     }
@@ -459,7 +480,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       await withConn(c => setAtivo(c, alunoAtual.id, false));
       return (
         header({ ...alunoAtual, ativo: false }) +
-        "⏸️ Seu cadastro no sistema automático do RU do IFSP Pirituba foi *desativado*.\n\n" +
+        "Seu cadastro no sistema automático de almoço do IFSP Pirituba foi *desativado*.\n\n" +
         "Você pode enviar *Ativar* quando quiser voltar.\n" +
         "Envie *Ajuda* para ver o menu."
       );
@@ -468,7 +489,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     if (n === "cadastrar") {
       return (
         header(alunoAtual) +
-        "✅ Seu número já está *cadastrado* no sistema do RU do IFSP Pirituba.\n\n" +
+        "Seu número já está *cadastrado* no sistema de almoço do IFSP Pirituba.\n\n" +
         "Envie *Ajuda* para ver o menu de comandos."
       );
     }
@@ -476,8 +497,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     // fallback padrão
     return (
       header(alunoAtual) +
-      "Não entendi seu comando.\n\n" +
-      "Envie *Ajuda* para ver o menu de opções do assistente do RU do IFSP Pirituba."
+      "Não entendi sua mensagem.\n\n" +
+      "Envie *Ajuda* pra ver o menu de opções do assistente de almoço do IFSP Pirituba."
     );
   }
 
