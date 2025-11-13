@@ -96,8 +96,8 @@ def send_whatsapp_text_twilio(to_e164: str, body: str):
 # --------------------------- Dados ---------------------------------
 def load_alunos_para_dia(target_dow: int):
     """
-    Busca SOMENTE quem almoça no dia-alvo (preferencia_dia.dia_semana = target_dow)
-    e está ativo.
+    Busca SOMENTE quem almoça no dia-alvo e está ativo.
+    Retorna lista de dicts: { 'id': ..., 'prontuario': ... }
     """
     if not DATABASE_URL:
         raise RuntimeError("Faltou DATABASE_URL")
@@ -105,16 +105,17 @@ def load_alunos_para_dia(target_dow: int):
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                select distinct a.prontuario
+                select distinct a.id, a.prontuario
                   from aluno a
                   join preferencia_dia p on p.aluno_id = a.id
                  where a.ativo = true
                    and p.dia_semana = %s
                  order by a.prontuario;
             """, (target_dow,))
-            for (prontuario,) in cur.fetchall():
-                out.append({'prontuario': prontuario})
+            for (aluno_id, prontuario) in cur.fetchall():
+                out.append({'id': aluno_id, 'prontuario': prontuario})
     return out
+
 
 def get_bloqueios_por_prontuario(pront: str) -> list[str]:
     if not DATABASE_URL:
@@ -129,6 +130,29 @@ def get_bloqueios_por_prontuario(pront: str) -> list[str]:
                  order by pb.nome;
             """, (pront,))
             return [r[0] for r in cur.fetchall()]
+
+def registrar_pedido(aluno_id: int, dia_pedido, motivo: str):
+    """
+    Salva um registro na tabela 'pedido'.
+
+    dia_pedido: date -> normalmente a target_date (data do almoço).
+    motivo: texto curto explicando o que aconteceu.
+    """
+    if not DATABASE_URL:
+        return
+    # corta motivo gigante pra não encher a tabela com HTML inteiro, etc.
+    motivo = (motivo or "")[:800]
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into pedido (aluno_id, dia_pedido, motivo)
+                values (%s, %s, %s)
+                """,
+                (aluno_id, dia_pedido, motivo)
+            )
+        conn.commit()
+
 
 # --------------------- HTTP / parsing do site ----------------------
 def get_csrf_token(sess):
@@ -225,34 +249,52 @@ def main():
         pront = aluno['prontuario']
 
         # Checagem de bloqueios de prato
+        aluno_id = aluno['id']
+        pront    = aluno['prontuario']
+        
         bloqueios = get_bloqueios_por_prontuario(pront)
         skip, hits = should_skip(prato_do_dia, bloqueios)
         if skip:
             inicio = datetime.now(TZ).strftime('%H:%M:%S')
             time.sleep(random.randint(0, JITTER_MAX))
             fim = datetime.now(TZ).strftime('%H:%M:%S')
-            detalhes.append((pront, True, f'PULOU_PREF: {hits}', inicio, fim, 0))
+        
+            motivo = f'NAO_PEDIU: prato contém bloqueios -> {hits}'
+            registrar_pedido(aluno_id, target_date, motivo)
+        
+            detalhes.append((pront, True, motivo, inicio, fim, 0))
             continue
 
-        # Tentativa de pedido
-        time.sleep(random.randint(0, JITTER_MAX))
-        inicio = datetime.now(TZ).strftime('%H:%M:%S')
+          # Tentativa de pedido
+          time.sleep(random.randint(0, JITTER_MAX))
+          inicio = datetime.now(TZ).strftime('%H:%M:%S')
+          
+          sucesso, mensagem = False, ''
+          tentativa = 0
+          for tentativa in range(1, TENTATIVAS + 1):
+              try:
+                  r = enviar_prontuario(sess, pront)
+                  sucesso, mensagem = parse_feedback(r.text)
+                  if sucesso:
+                      break
+                  raise ValueError(mensagem)
+              except Exception as e:
+                  mensagem = str(e)
+                  time.sleep(RETRY_SEC)
+          
+          fim = datetime.now(TZ).strftime('%H:%M:%S')
+          detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
 
-        sucesso, mensagem = False, ''
-        tentativa = 0
-        for tentativa in range(1, TENTATIVAS + 1):
-            try:
-                r = enviar_prontuario(sess, pront)
-                sucesso, mensagem = parse_feedback(r.text)
-                if sucesso:
-                    break
-                raise ValueError(mensagem)
-            except Exception as e:
-                mensagem = str(e)
-                time.sleep(RETRY_SEC)
+    fim = datetime.now(TZ).strftime('%H:%M:%S')
+    detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
+    
+    if sucesso:
+        motivo = f'PEDIU_OK: {mensagem}'
+    else:
+        motivo = f'ERRO_PEDIDO: {mensagem}'
+    
+    registrar_pedido(aluno_id, target_date, motivo)
 
-        fim = datetime.now(TZ).strftime('%H:%M:%S')
-        detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
 
     # ----------------- E-mail de relatório -----------------
     linhas = ['Relatório Auto-Almoço — ' + now.strftime('%d/%m/%Y')]
