@@ -16,7 +16,10 @@ const {
   fetchLatestBaileysVersion,
   DisconnectReason,
   Browsers,
-  isJidGroup, 
+  isJidGroup,
+  isJidBroadcast,
+  isJidStatusBroadcast,
+  isJidNewsletter,
   extractMessageContent,
   jidNormalizedUser,
   getContentType
@@ -192,7 +195,11 @@ async function startWA() {
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
-    shouldIgnoreJid: jid => String(jid).endsWith("@newsletter") // evita ruído em init, prática comum
+
+    shouldIgnoreJid: jid => {
+     const j = String(jid);
+     return _isGroup(j) || _isBroadcast(j) || _isStatus(j) || _isNewsletter(j); // Igonora grupo pela amor de Deus
+   }
   });
 
   lastPongAt = Date.now();
@@ -261,12 +268,6 @@ async function startWA() {
         let jid = m.key?.remoteJid || "";
         if (!jid || jid.endsWith("@status")) continue;
         jid = jidNormalizedUser(jid);
-
-        // IGNORA GRUPOS / BROADCAST / STATUS
-        if (isJidGroup(jid) || isJidBroadcast(jid) || isJidStatusBroadcast(jid)) {
-          logger.info({ jid }, "Ignorando chat não-privado");
-          continue;
-        }
 
         const ct = getContentType(m.message);
         logger.info({ type, fromMe, jid, ct }, "RX upsert");
