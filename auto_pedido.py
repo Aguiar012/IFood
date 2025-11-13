@@ -250,12 +250,12 @@ def main():
         fim = datetime.now(TZ).strftime('%H:%M:%S')
         detalhes.append((pront, sucesso, mensagem, inicio, fim, tentativa))
     
-    if sucesso:
-        motivo = f'PEDIU_OK: {mensagem}'
-    else:
-        motivo = f'ERRO_PEDIDO: {mensagem}'
-    
-    registrar_pedido(aluno_id, target_date, motivo)
+        if sucesso:
+            motivo = f'PEDIU_OK: {mensagem}'
+        else:
+            motivo = f'ERRO_PEDIDO: {mensagem}'
+        
+        registrar_pedido(aluno_id, target_date, motivo)
 
 
     # ----------------- E-mail de relatório -----------------
