@@ -25,6 +25,11 @@ const {
   getContentType
 } = baileys;
 
+const _isGroup = j => (isJidGroup?.(j)) || String(j).endsWith("@g.us");
+const _isBroadcast = j => (isJidBroadcast?.(j)) || String(j).endsWith("@broadcast");
+const _isStatus = j => (isJidStatusBroadcast?.(j)) || String(j) === "status@broadcast";
+const _isNewsletter = j => (isJidNewsletter?.(j)) || String(j).endsWith("@newsletter");
+
 import paths from "../paths.js";
 import { createConversaFlow } from "./conversa_flow.js";
 
