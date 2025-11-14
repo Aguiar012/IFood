@@ -179,17 +179,42 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return rows[0] || null;
   }
 
-  async function createAlunoComContato(c, { nome, prontuario, telefone }) {
-    const a = await c.query(
-      `INSERT INTO aluno (nome, prontuario, ativo) VALUES ($1,$2,true) RETURNING id`,
-      [nome, prontuario]
+  async function findAlunoByProntuario(c, prontuario) {
+    const q = `SELECT * FROM aluno WHERE prontuario = $1 LIMIT 1`;
+    const { rows } = await c.query(q, [prontuario]);
+    return rows[0] || null;
+  }
+
+  async function ensureAlunoContato(c, { prontuario, telefone }) {
+    const aluno = await findAlunoByProntuario(c, prontuario);
+    if (!aluno) {
+      return { ok: false, reason: "NAO_TURMA" };
+    }
+
+    const { rows } = await c.query(
+      `SELECT telefone FROM contato WHERE aluno_id = $1 LIMIT 1`,
+      [aluno.id]
     );
-    const alunoId = a.rows[0].id;
+
+    if (rows.length) {
+      const telExistente = onlyDigits(rows[0].telefone || "");
+      const telNovo = onlyDigits(telefone || "");
+      if (telExistente !== telNovo) {
+        return {
+          ok: false,
+          reason: "JA_VINCULADO",
+          telefone: telExistente,
+          aluno
+        };
+      }
+      return { ok: true, alunoId: aluno.id, aluno };
+    }
+
     await c.query(
       `INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`,
-      [alunoId, telefone]
+      [aluno.id, telefone]
     );
-    return alunoId;
+    return { ok: true, alunoId: aluno.id, aluno };
   }
 
   async function setPreferenciasDias(c, alunoId, dias = []) {
@@ -401,14 +426,14 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
     // ================= cadastro (ainda não existe no banco) =================
     if (!aluno) {
-      // fast-forward do consentimento
+      // fast-forward do consentimento: agora só pedimos PT
       if (["sim", "s", "ok", "yes", "continuar"].includes(n)) {
-        setUser(jid, { step: "ASK_NOME", temp: {} });
+        setUser(jid, { step: "ASK_PRONT", temp: {} });
         return (
           header(null, null) +
-          "*Cadastro de aluno – IFSP Pirituba*\n\n" +
-          "Como devo te chamar?\n" +
-          "Envie seu *nome completo* como está no IFSP."
+          "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
+          "Envie seu *prontuário (PT)* exatamente como aparece no SUAP.\n" +
+          "Ex.: *PT3029791*."
         );
       }
 
@@ -426,40 +451,25 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         );
       }
 
-      if (u.step === "ASK_NOME") {
-        if (text.length < 2) {
-          return (
-            header(null, null) +
-            "Nome muito curto.\n" +
-            "Envie seu *nome completo* como está no cadastro do IFSP."
-          );
-        }
-        setUser(jid, { step: "ASK_PRONT", temp: { ...u.temp, nome: strip(text) } });
-        return (
-          header(null, null) +
-          "*Nome recebido!*\n\n" +
-          "Agora envie seu *prontuário IFSP* (ex.: *3029701* ou *3X028702*).\n" +
-          "Aceitamos de 5 a 12 caracteres com letras e números."
-        );
-      }
-
       if (u.step === "ASK_PRONT") {
         const pront = strip(text).toUpperCase().replace(/\s+/g, "");
-        if (!/^[A-Z0-9]{5,12}$/.test(pront)) {
+
+        if (!/^PT[0-9A-Z]{5,10}$/.test(pront)) {
           return (
             header(null, null) +
             "*Formato de prontuário inválido.*\n\n" +
-            "Envie algo como *3029701* ou *3X028702*.\n" +
-            "Use apenas letras e números (5 a 12 caracteres)."
+            "Envie algo como *PT3029791*.\n" +
+            "Use o mesmo código que aparece no SUAP."
           );
         }
-        setUser(jid, { step: "ASK_DIAS_REG", temp: { ...u.temp, prontuario: pront } });
+
+        setUser(jid, { step: "ASK_DIAS_REG", temp: { prontuario: pront } });
+
         return (
           header(null, null) +
-          "*Prontuário registrado!*\n\n" +
-          "Pra finalizar seu cadastro no sistema automático de pedidos do IFSP Pirituba:\n" +
-          "quais dias você *costuma almoçar* no câmpus?\n\n" +
-          "Envie algo como: *seg, ter, qua, qui, sex*."
+          "*Prontuário recebido!*\n\n" +
+          "Agora me diga em quais dias você *costuma almoçar* no câmpus.\n" +
+          "Exemplo: *seg, ter, qua, qui, sex*."
         );
       }
 
@@ -473,27 +483,56 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           );
         }
 
-        const alunoId = await withConn(async c => {
-          const id = await createAlunoComContato(c, {
-            nome: u.temp.nome,
-            prontuario: u.temp.prontuario,
-            telefone: phone
-          });
-          await setPreferenciasDias(c, id, dias);
-          return id;
+        const pront = u.temp?.prontuario;
+        if (!pront) {
+          setUser(jid, { step: "NEW", temp: {} });
+          return ONBOARDING;
+        }
+
+        const res = await withConn(async c => {
+          const vinculo = await ensureAlunoContato(c, { prontuario: pront, telefone: phone });
+          if (!vinculo.ok) return vinculo;
+          await setPreferenciasDias(c, vinculo.alunoId, dias);
+          await setAtivo(c, vinculo.alunoId, true);
+          return vinculo;
         });
 
-        setUser(jid, { step: "MAIN", temp: {}, aluno_id: alunoId });
+        if (!res.ok) {
+          if (res.reason === "NAO_TURMA") {
+            return (
+              header(null, null) +
+              "*Prontuário não encontrado na turma do piloto.*\n\n" +
+              "Este teste está habilitado só para o *2º ano de Redes*.\n" +
+              "Confere se você digitou o PT certo (igual ao do SUAP)."
+            );
+          }
+          if (res.reason === "JA_VINCULADO") {
+            return (
+              header(null, null) +
+              "*Esse prontuário já foi cadastrado antes.*\n\n" +
+              "Ele já está vinculado a outro número de WhatsApp.\n" +
+              "Se isso estiver errado, procure a CAE ou o responsável pelo projeto."
+            );
+          }
 
-        const alunoFake = {
-          nome: u.temp.nome,
-          prontuario: u.temp.prontuario,
+          return (
+            header(null, null) +
+            "Tive um problema ao salvar seu cadastro.\n" +
+            "Tenta novamente mais tarde ou fala com o responsável pelo projeto."
+          );
+        }
+
+        const alunoBanco = {
+          nome: res.aluno?.nome,
+          prontuario: res.aluno?.prontuario,
           ativo: true
         };
 
+        setUser(jid, { step: "MAIN", temp: {}, aluno_id: res.alunoId });
+
         return (
-          header(alunoFake, null) +
-          "*Cadastro concluído no sistema automático de pedidos (IFSP Pirituba).* \n\n" +
+          header(alunoBanco, null) +
+          "*Cadastro concluído no sistema automático de pedidos (piloto 2º ano Redes).* \n\n" +
           `Dias preferidos registrados: *${diasHumanos(dias)}*.\n\n` +
           "A partir de agora, você pode:\n" +
           "• Enviar *Cancelar* para registrar pedido de cancelamento de almoço.\n" +
@@ -577,7 +616,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         );
       }
 
-      // se mandou algo aleatório, repete a confirmação
       return (
         header(alunoAtual, ultimoPedido) +
         "Só pra confirmar:\n\n" +
