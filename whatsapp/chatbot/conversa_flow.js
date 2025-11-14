@@ -461,8 +461,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         pront = pront.replace(/\D/g, "");  
         
         if (!/^\d{5,12}$/.test(pront)) {
-
-        if (!/^PT[0-9A-Z]{5,10}$/.test(pront)) {
           return (
             header(null, null) +
             "*Formato de prontuário inválido.*\n\n" +
