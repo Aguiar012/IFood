@@ -35,15 +35,25 @@ WEEKDAY_PT = {1:'seg',2:'ter',3:'qua',4:'qui',5:'sex',6:'sab',7:'dom'}
 
 def compute_target_date(now: datetime | None = None):
     """
-    Retorna a data DO ALMOÇO que o SICA considera no momento atual.
+    Regra ajustada para bater com o SICA:
+
     - Antes de 13:15 -> D+1
-    - A partir de 13:15 -> D+2
+    - Depois de 13:15 -> D+2
+    - Se cair em sábado ou domingo, empurra até segunda.
     """
     if now is None:
         now = datetime.now(TZ)
+
     cutoff = now.replace(hour=CUTOFF_HOUR, minute=CUTOFF_MIN, second=0, microsecond=0)
     days_ahead = 1 if now < cutoff else 2
-    return (now + timedelta(days=days_ahead)).date()
+
+    target = (now + timedelta(days=days_ahead)).date()
+
+    # isoweekday(): 1 = segunda, ..., 6 = sábado, 7 = domingo
+    while target.isoweekday() in (6, 7):
+        target += timedelta(days=1)
+
+    return target
 
 # --------------------------- E-mail --------------------------------
 def send_email(subject: str, body: str):
