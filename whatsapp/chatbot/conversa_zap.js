@@ -69,6 +69,12 @@ let lastPongAt = 0;
 let lastActivityAt = 0; // RX/TX recente
 globalThis.__lastQR = "";
 
+// evita responder a mesma mensagem 2x
+const handledMessageIds = new Set();
+// limpa o cache periodicamente pra não crescer sem fim
+setInterval(() => handledMessageIds.clear(), 60_000);
+
+
 // ====== LOCK simples (opcional em ambiente com volume compartilhado) ======
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
@@ -264,18 +270,39 @@ async function startWA() {
     }
   });
 
+
   // ===== Inbound =====
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
+      // só responde a eventos "reais" de chat, não histórico / append
+      if (type !== "notify") {
+        logger.info({ type }, "messages.upsert ignorado (não-notify)");
+        return;
+      }
+
       if (!messages?.length) return;
+
       for (const m of messages) {
+        const msgId = m.key?.id;
+        if (!msgId) {
+          logger.warn("Mensagem sem ID, ignorando");
+          continue;
+        }
+
+        // trava contra duplicados (reconnect, replay, etc.)
+        if (handledMessageIds.has(msgId)) {
+          logger.info({ msgId }, "Mensagem duplicada ignorada");
+          continue;
+        }
+        handledMessageIds.add(msgId);
+
         const fromMe = !!m.key?.fromMe;
         let jid = m.key?.remoteJid || "";
         if (!jid || jid.endsWith("@status")) continue;
         jid = jidNormalizedUser(jid);
 
         const ct = getContentType(m.message);
-        logger.info({ type, fromMe, jid, ct }, "RX upsert");
+        logger.info({ type, fromMe, jid, ct, msgId }, "RX upsert");
 
         if (fromMe) continue;
 
@@ -297,7 +324,7 @@ async function startWA() {
         try {
           await sock.presenceSubscribe(jid);
           await sock.sendPresenceUpdate("composing", jid);
-          await sleep(300 + Math.floor(Math.random()*400));
+          await sleep(300 + Math.floor(Math.random() * 400));
           await sock.sendPresenceUpdate("paused", jid);
         } catch {}
 
@@ -312,13 +339,12 @@ async function startWA() {
 
         await sock.sendMessage(jid, { text: reply });
         lastActivityAt = Date.now();
-        logger.info({ jid }, "TX reply");
+        logger.info({ jid, msgId }, "TX reply");
       }
     } catch (e) {
       logger.error(e, "falha no handler de mensagem");
     }
   });
-}
 
 // ====== HTTP util ======
 app.get("/", (_req, res) => res.send("ok"));
