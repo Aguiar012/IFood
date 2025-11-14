@@ -75,6 +75,7 @@ const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
 
 
+
 // ====== LOCK simples (opcional em ambiente com volume compartilhado) ======
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
@@ -184,7 +185,6 @@ async function safeStartWA(force = false) {
     startingWA = false;
   }
 }
-
 // ====== WhatsApp ======
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
@@ -206,18 +206,22 @@ async function startWA() {
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
-
     shouldIgnoreJid: jid => {
-     const j = String(jid);
-     return _isGroup(j) || _isBroadcast(j) || _isStatus(j) || _isNewsletter(j); // Igonora grupo pela amor de Deus
-   }
+      const j = String(jid);
+      // ignora grupos, listas de transmissão, status, newsletter
+      return _isGroup(j) || _isBroadcast(j) || _isStatus(j) || _isNewsletter(j);
+    }
   });
 
   lastPongAt = Date.now();
   lastActivityAt = Date.now();
 
   // observa pongs reais
-  try { sock.ws?.on?.("pong", () => { lastPongAt = Date.now(); }); } catch {}
+  try {
+    sock.ws?.on?.("pong", () => {
+      lastPongAt = Date.now();
+    });
+  } catch {}
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -247,7 +251,9 @@ async function startWA() {
       waReady = false;
 
       if (status === DisconnectReason.loggedOut) {
-        try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
+        try {
+          fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true });
+        } catch {}
         fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
         logger.warn({ status }, "Logout detectado — auth resetado, gere novo QR.");
         setTimeout(() => safeStartWA(true), 1500);
@@ -258,23 +264,26 @@ async function startWA() {
         err428Count++;
         const base = 20_000;
         // backoff com jitter, teto ~30min
-        const hold = Math.min((base * Math.pow(2, Math.min(err428Count, 6))) + Math.floor(Math.random()*base), 30*60*1000);
+        const hold = Math.min(
+          (base * Math.pow(2, Math.min(err428Count, 6))) +
+          Math.floor(Math.random() * base),
+          30 * 60 * 1000
+        );
         logger.warn({ status, err428Count, hold }, "WA desconectado (428)");
         setTimeout(() => safeStartWA(true), hold);
         return;
       }
 
       logger.warn({ status }, "WA desconectado");
-      setTimeout(() => safeStartWA(true), reconnectDelay + Math.floor(Math.random()*1000));
+      setTimeout(() => safeStartWA(true), reconnectDelay + Math.floor(Math.random() * 1000));
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_DELAY);
     }
   });
 
-
   // ===== Inbound =====
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
-      // só responde a eventos "reais" de chat, não histórico / append
+      // só responde a eventos reais de chat
       if (type !== "notify") {
         logger.info({ type }, "messages.upsert ignorado (não-notify)");
         return;
@@ -289,7 +298,7 @@ async function startWA() {
           continue;
         }
 
-        // trava contra duplicados (reconnect, replay, etc.)
+        // trava contra duplicados (replay após reconnect etc.)
         if (handledMessageIds.has(msgId)) {
           logger.info({ msgId }, "Mensagem duplicada ignorada");
           continue;
@@ -345,7 +354,7 @@ async function startWA() {
       logger.error(e, "falha no handler de mensagem");
     }
   });
-
+}
 // ====== HTTP util ======
 app.get("/", (_req, res) => res.send("ok"));
 
