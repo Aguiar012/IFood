@@ -432,8 +432,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         return (
           header(null, null) +
           "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
-          "Envie seu *prontuário (PT)* exatamente como aparece no SUAP.\n" +
-          "Ex.: *PT3029791*."
+          "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
         );
       }
 
@@ -452,7 +451,16 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       }
 
       if (u.step === "ASK_PRONT") {
-        const pront = strip(text).toUpperCase().replace(/\s+/g, "");
+        // remove qualquer "PT" no início da string
+        let pront = strip(text)
+          .replace(/\s+/g, "")
+          .toUpperCase()
+          .replace(/^PT/, "");   // <-- REMOVE o PT no começo
+        
+        // só mantém dígitos no final
+        pront = pront.replace(/\D/g, "");  
+        
+        if (!/^\d{5,12}$/.test(pront)) {
 
         if (!/^PT[0-9A-Z]{5,10}$/.test(pront)) {
           return (
