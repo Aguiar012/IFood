@@ -76,25 +76,29 @@ setInterval(() => handledMessageIds.clear(), 60_000);
 
 
 
-// ====== LOCK simples (opcional em ambiente com volume compartilhado) ======
+// ====== LOCK simples (mas sem derrubar o processo em k8s) ======
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
 fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
-function readLock(){ try{ return JSON.parse(fs.readFileSync(LOCK_FILE,"utf8")); }catch{return null;} }
-function writeLock(){ try{ fs.writeFileSync(LOCK_FILE, JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })); }catch{} }
-function isPidAlive(pid){ try{ process.kill(pid,0); return true; } catch { return false; } }
-(function tryAcquireLock(){
-  const cur = readLock(); const now = Date.now(); const TTL = 90_000;
-  if (cur) {
-    const sameHost = cur.host === HOST;
-    const fresh = now - (cur.ts||0) < TTL;
-    const alive = sameHost && cur.pid && isPidAlive(cur.pid);
-    if (sameHost && !alive) { writeLock(); return; }
-    if (!sameHost && fresh) { console.error("Outra instância ativa com mesmo volume. Abortando."); process.exit(1); }
+
+function writeLockSafe() {
+  try {
+    fs.writeFileSync(
+      LOCK_FILE,
+      JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })
+    );
+  } catch {
+    // se der erro de fs, só ignora; nunca derruba o bot por isso
   }
-  writeLock();
+}
+
+// em ambiente com um único serviço de WA, não faz sentido abortar se já tiver lock.
+// apenas sobrescreve o lock sempre.
+(function initLock() {
+  writeLockSafe();
 })();
-setInterval(writeLock, 30_000);
+
+setInterval(writeLockSafe, 30_000);
 
 // ====== Proxy ======
 let __proxyAgent;
