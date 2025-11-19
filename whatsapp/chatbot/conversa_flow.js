@@ -2,6 +2,7 @@
 import fs from "fs";
 import path from "path";
 import { Pool } from "pg";
+import nodemailer from "nodemailer";
 
 function onlyDigits(s = "") { return (s || "").replace(/\D/g, ""); }
 function jidToPhone(jid = "") { return onlyDigits(String(jid).split("@")[0]); }
@@ -41,6 +42,11 @@ function ddmm(d) {
   const dd = String(x.getDate()).padStart(2, "0");
   const mm = String(x.getMonth() + 1).padStart(2, "0");
   return `${dd}/${mm}`;
+}
+
+function isoDateUTC(d) {
+  // YYYY-MM-DD, usado só para comparar "mesmo dia alvo" no state
+  return new Date(d).toISOString().slice(0, 10);
 }
 
 function addDays(d, n) {
@@ -136,6 +142,22 @@ function header(aluno, ultimoPedido) {
   return txt;
 }
 
+// ---- e-mail de cancelamento (Gmail) ----
+const GMAIL_USER = process.env.GMAIL_USER || "";
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
+const CAE_EMAIL = process.env.CAE_EMAIL || GMAIL_USER || "";
+
+let mailTransporter = null;
+if (GMAIL_USER && GMAIL_APP_PASSWORD) {
+  mailTransporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: GMAIL_USER,
+      pass: GMAIL_APP_PASSWORD,
+    },
+  });
+}
+
 export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = console }) {
   // --------- estado em arquivo ----------
   const STORE_FILE = path.join(dataDir, "conversa_flow_state.json");
@@ -153,6 +175,48 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   function setUser(jid, patch) {
     state[jid] = { ...(state[jid] || { step: "NEW", temp: {} }), ...patch };
     saveState();
+  }
+
+  // --- helper para envio de e-mail de cancelamento ---
+  async function sendCancelEmail({ aluno, alvoDate, phone }) {
+    if (!mailTransporter || !CAE_EMAIL) {
+      logger.error("E-mail de cancelamento não configurado (GMAIL_USER / GMAIL_APP_PASSWORD / CAE_EMAIL).");
+      return { ok: false, reason: "NO_TRANSPORT" };
+    }
+
+    const dataStr = ddmm(alvoDate);
+    const diaSemana = DIA_LONGO[alvoDate.getDay()];
+    const nome = aluno.nome || "Aluno";
+    const prontBase = String(aluno.prontuario || "").toUpperCase();
+    const prontCompleto = prontBase.startsWith("PT") ? prontBase : `PT${prontBase}`;
+    const tel = phone || "";
+
+    const subject = `[IFSP Pirituba] Cancelamento de almoço - ${prontCompleto} - ${dataStr}`;
+    const text =
+`Solicitação automática de cancelamento de almoço
+
+Aluno: ${nome}
+Prontuário: ${prontCompleto}
+Telefone (WhatsApp): ${tel}
+
+Dia do almoço a cancelar: ${diaSemana}, ${dataStr}
+
+Mensagem gerada pelo Assistente de Almoço (piloto 2º ano Redes).
+Por favor, considerar o cancelamento de acordo com as regras da CAE.`;
+
+    try {
+      await mailTransporter.sendMail({
+        from: `"Assistente de Almoço IFSP Pirituba" <${GMAIL_USER}>`,
+        to: CAE_EMAIL,
+        subject,
+        text,
+      });
+      logger.info?.("E-mail de cancelamento enviado com sucesso para", CAE_EMAIL);
+      return { ok: true };
+    } catch (err) {
+      logger.error("Erro ao enviar e-mail de cancelamento:", err);
+      return { ok: false, reason: "SMTP_ERROR", error: String(err) };
+    }
   }
 
   // --------- DB ----------
@@ -296,7 +360,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return (
       header(aluno, ultimoPedido) +
       "Menu principal\n\n" +
-      "• *Cancelar*  → registrar cancelamento de almoço\n" +
+      "• *Cancelar*  → mandar e-mail de cancelamento de almoço para a CAE\n" +
       "• *Preferência*  → escolher dias em que você costuma almoçar no câmpus\n" +
       "• *Bloquear*  → informar pratos que você não come / quer evitar\n" +
       "• *Ativar* / *Desativar*  → ligar ou pausar seu cadastro\n" +
@@ -308,8 +372,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
   const ONBOARDING =
     header(null, null) +
-    "Eu ajudo a registrar cancelamento de almoço e preferências (dias e pratos)\n" +
-    "no sistema de pedidos de almoço do câmpus Pirituba.\n\n" +
+    "Eu ajudo a registrar cancelamento de almoço (via e-mail para a CAE)\n" +
+    "e preferências (dias e pratos) no sistema de pedidos de almoço do câmpus Pirituba.\n\n" +
     "Pra começar o cadastro, envie: *CONTINUAR*.\n" +
     "Se não quiser agora, pode voltar a qualquer momento enviando *Ajuda*.";
 
@@ -426,7 +490,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
     // ================= cadastro (ainda não existe no banco) =================
     if (!aluno) {
-      // fast-forward do consentimento: agora só pedimos PT
+      // fast-forward do consentimento: agora só pedimos PT (sem PT no BD)
       if (["sim", "s", "ok", "yes", "continuar"].includes(n)) {
         setUser(jid, { step: "ASK_PRONT", temp: {} });
         return (
@@ -451,21 +515,19 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       }
 
       if (u.step === "ASK_PRONT") {
-        // remove qualquer "PT" no início da string
+        // remove espaços, PT no começo e tudo que não for dígito
         let pront = strip(text)
           .replace(/\s+/g, "")
           .toUpperCase()
-          .replace(/^PT/, "");   // <-- REMOVE o PT no começo
-        
-        // só mantém dígitos no final
-        pront = pront.replace(/\D/g, "");  
-        
+          .replace(/^PT/, "");
+        pront = pront.replace(/\D/g, "");
+
         if (!/^\d{5,12}$/.test(pront)) {
           return (
             header(null, null) +
             "*Formato de prontuário inválido.*\n\n" +
-            "Envie algo como *PT3029791*.\n" +
-            "Use o mesmo código que aparece no SUAP."
+            "Envie algo como *3029791*.\n" +
+            "Use o mesmo código numérico que aparece no SUAP (sem PT)."
           );
         }
 
@@ -509,7 +571,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
               header(null, null) +
               "*Prontuário não encontrado na turma do piloto.*\n\n" +
               "Este teste está habilitado só para o *2º ano de Redes*.\n" +
-              "Confere se você digitou o PT certo (igual ao do SUAP)."
+              "Confere se você digitou o código igual ao do SUAP."
             );
           }
           if (res.reason === "JA_VINCULADO") {
@@ -541,7 +603,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           "*Cadastro concluído no sistema automático de pedidos (piloto 2º ano Redes).* \n\n" +
           `Dias preferidos registrados: *${diasHumanos(dias)}*.\n\n` +
           "A partir de agora, você pode:\n" +
-          "• Enviar *Cancelar* para registrar pedido de cancelamento de almoço.\n" +
+          "• Enviar *Cancelar* para mandar um e-mail de cancelamento de almoço.\n" +
           "• Enviar *Preferência* para alterar os dias.\n" +
           "• Enviar *Bloquear* para registrar pratos que não come.\n\n" +
           "Envie *Ajuda* para ver o menu completo."
@@ -599,13 +661,39 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     if (u.step === "CONFIRM_CANCEL") {
       const d = new Date(u.temp?.cancelDate || new Date());
       const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
+      const alvoIso = isoDateUTC(d);
 
+      // se já cancelou esse dia antes, não manda outro e-mail
       if (["sim", "s", "ok", "yes", "confirmar", "confirmo"].includes(n)) {
-        setUser(jid, { step: "MAIN", temp: {} });
+        if (u.lastCancelDate === alvoIso) {
+          return (
+            header(alunoAtual, ultimoPedido) +
+            "*Esse almoço já teve um pedido de cancelamento registrado para esse número.*\n\n" +
+            `Alvo: *${alvo}*.\n` +
+            "Não vou enviar outro e-mail para evitar duplicidade.\n\n" +
+            "Se achar que houve erro, procure a CAE."
+          );
+        }
+
+        const resEmail = await sendCancelEmail({ aluno: alunoAtual, alvoDate: d, phone });
+
+        if (!resEmail.ok) {
+          return (
+            header(alunoAtual, ultimoPedido) +
+            "Tentei mandar o e-mail de cancelamento, mas aconteceu um erro técnico.\n\n" +
+            "Recomendo cancelar manualmente pelo site ou diretamente com a CAE.\n\n" +
+            "Detalhe técnico (para o responsável pelo sistema): " +
+            (resEmail.reason || "erro ao enviar e-mail") +
+            "."
+          );
+        }
+
+        setUser(jid, { step: "MAIN", temp: {}, lastCancelDate: alvoIso });
+
         return (
           header(alunoAtual, ultimoPedido) +
           "*Pedido de cancelamento registrado.*\n\n" +
-          `Almoço de *${alvo}* marcado para cancelamento junto à CAE do IFSP Pirituba,\n` +
+          `Enviei um e-mail para a CAE pedindo o cancelamento do almoço de *${alvo}*,\n` +
           `usando o seu prontuário *${alunoAtual.prontuario}*.\n\n` +
           "Guarde esta mensagem como comprovante.\n" +
           "Envie *Status* para ver seus dados ou *Ajuda* para o menu."
@@ -622,11 +710,12 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         );
       }
 
+      // se mandou algo aleatório, repete a confirmação
       return (
         header(alunoAtual, ultimoPedido) +
         "Só pra confirmar:\n\n" +
-        `Você deseja que eu registre o *cancelamento do almoço de ${alvo}* ` +
-        `na CAE do IFSP Pirituba usando o seu prontuário *${alunoAtual.prontuario}*?\n\n` +
+        `Você deseja que eu mande um *e-mail de cancelamento do almoço de ${alvo}* ` +
+        `para a CAE do IFSP Pirituba usando o seu prontuário *${alunoAtual.prontuario}*?\n\n` +
         "Responda *SIM* para confirmar ou *NÃO* para voltar."
       );
     }
@@ -641,6 +730,19 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     ) {
       const alvoDate = diaCancelamentoAlvo(new Date());
       const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
+      const alvoIso = isoDateUTC(alvoDate);
+
+      // se já cancelou esse alvo, nem entra em confirmação
+      if (u.lastCancelDate === alvoIso) {
+        return (
+          header(alunoAtual, ultimoPedido) +
+          "*Já existe um pedido de cancelamento registrado para esse dia usando este número.*\n\n" +
+          `Alvo atual pelas regras de horário: *${alvo}*.\n` +
+          "Não vou abrir outro pedido para evitar duplicidade.\n\n" +
+          "Se achar que houve algum erro, procure a CAE."
+        );
+      }
+
       setUser(jid, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate } });
 
       return (
@@ -650,7 +752,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         "• Até *13:15*: cancela o almoço de *hoje*.\n" +
         "• Depois de *13:15*: cancela o almoço de *amanhã*.\n\n" +
         `Pela hora atual, o alvo é: *${alvo}*.\n\n` +
-        `Confirmar cancelamento desse almoço usando seu prontuário *${alunoAtual.prontuario}*?\n\n` +
+        `Confirmar que eu mande um e-mail para cancelar esse almoço usando seu prontuário *${alunoAtual.prontuario}*?\n\n` +
         "Responda *SIM* para confirmar ou *NÃO* para voltar."
       );
     }
