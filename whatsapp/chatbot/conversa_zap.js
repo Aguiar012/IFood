@@ -19,7 +19,6 @@ const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 
-// Garante pastas
 try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
@@ -52,7 +51,7 @@ if (!useMultiFileAuthState || !makeWASocket) {
   throw new Error("CRÍTICO: Funções do Baileys não encontradas.");
 }
 
-// ====== 3. MEMÓRIA PERSISTENTE (STORE) ======
+// ====== 3. MEMÓRIA ======
 let store;
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
@@ -61,7 +60,6 @@ if (typeof makeInMemoryStore === 'function') {
         try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
     }, 10_000);
 } else {
-    logger.warn("⚠️ Usando memória simples.");
     store = {
         contacts: {},
         bind: (ev) => {
@@ -85,7 +83,6 @@ globalThis.__lastQR = "";
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
 
-// Lock
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
 try { fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true }); } catch {}
@@ -134,23 +131,16 @@ async function startWA() {
       const { version } = await fetchLatestBaileysVersion();
       const agent = await buildProxyAgent(PROXY_URL);
 
-      logger.info(`Iniciando socket... Versão: ${version.join('.')}`);
-
       sock = makeWASocket({
         version,
         auth: state,
         logger,
-        // Navegador Fixo para evitar rejeição do servidor
         browser: ["Ubuntu", "Chrome", "20.0.04"], 
         agent,             
         fetchAgent: agent, 
         markOnlineOnConnect: true,
         syncFullHistory: true, 
-        // TIMEOUTS AUMENTADOS PARA EVITAR QUEDAS
-        connectTimeoutMs: 180_000, // 3 minutos para conectar
-        defaultQueryTimeoutMs: 180_000, // 3 minutos para queries
-        keepAliveIntervalMs: 60_000, // Ping a cada 1 min
-        retryRequestDelayMs: 5000,
+        connectTimeoutMs: 60_000,
         printQRInTerminal: false,
         shouldIgnoreJid: jid => {
           const j = String(jid);
@@ -166,7 +156,7 @@ async function startWA() {
         if (qr) {
           globalThis.__lastQR = qr;
           qrcode.generate(qr, { small: true });
-          logger.info("QR Code gerado. Escaneie para vincular.");
+          logger.info("QR Code gerado.");
         }
         if (connection === "open") {
           waReady = true;
@@ -176,29 +166,21 @@ async function startWA() {
         }
         if (connection === "close") {
           const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
-          const shouldReconnect = status !== DisconnectReason.loggedOut;
-          
           waReady = false;
-          logger.warn({ status }, "Conexão fechada.");
-
           if (status === DisconnectReason.loggedOut) {
-            logger.error("Sessão encerrada (Logout). Limpando dados...");
-            try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
-            // Reinicia para gerar novo QR limpo
-            cleanupSock();
-            setTimeout(() => startWA(), 3000);
+             try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
+             cleanupSock();
+             setTimeout(() => startWA(), 3000);
           } else {
-             // Reconexão suave (sem limpar dados)
              cleanupSock();
              setTimeout(() => startWA(), 5000); 
           }
         }
       });
 
-      // Monitoramento de Pongs (Keep Alive)
       sock.ws.on("pong", () => { lastPongAt = Date.now(); });
 
-      // Mensagens
+      // === HANDLER DE MENSAGENS ===
       sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (type !== "notify" || !messages?.length) return;
 
@@ -210,23 +192,49 @@ async function startWA() {
             const fromMe = !!m.key?.fromMe;
             let jid = m.key?.remoteJid || "";
 
-            // --- TRADUÇÃO WEB ID ---
-            if (jid.includes("@lid") && store && store.contacts) {
-                const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-                const contact = store.contacts[lidKey] || store.contacts[jid];
-                if (contact && contact.id && !contact.id.includes("@lid")) {
-                    jid = contact.id; 
+            // 1. Tenta traduzir LID -> Número Real
+            if (jid.includes("@lid")) {
+                let resolved = false;
+                
+                // A) Se for o PRÓPRIO bot (você testando), usa o ID da conexão
+                if (fromMe && sock.user && sock.user.id) {
+                     const myPhone = jidNormalizedUser(sock.user.id);
+                     if (!myPhone.includes("@lid")) {
+                         jid = myPhone;
+                         resolved = true;
+                     }
+                }
+
+                // B) Se não resolveu, procura na memória (contatos)
+                if (!resolved && store && store.contacts) {
+                    const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
+                    const contact = store.contacts[lidKey] || store.contacts[jid];
+                    if (contact && contact.id && !contact.id.includes("@lid")) {
+                        jid = contact.id;
+                        resolved = true;
+                    }
                 }
             }
+
+            // 2. Normalização final
             if (jidNormalizedUser) jid = jidNormalizedUser(jid);
+
+            // 3. PORTÃO DE FERRO: Se ainda for @lid, ABORTA IMEDIATAMENTE.
+            // Isso impede que o ID errado seja salvo no banco.
+            if (jid.includes("@lid")) {
+                logger.warn({ jid }, "⚠️ ID Web não traduzido. Ignorando para proteger o banco.");
+                // Não envia mensagem, não faz nada. Apenas ignora até sincronizar.
+                continue; 
+            }
+            
             if (!jid || jid.endsWith("@status")) continue;
 
+            // Se chegou aqui, 'jid' é GARANTIDAMENTE um número de telefone válido.
             const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-            logger.info({ jid, ct }, "Mensagem recebida");
+            logger.info({ jid, ct }, "Mensagem processada com sucesso (ID Real)");
 
             if (fromMe) continue;
 
-            // Extrai texto
             const content = extractMessageContent ? extractMessageContent(m.message) : m.message;
             const text = content?.conversation || content?.extendedTextMessage?.text || "";
 
@@ -234,7 +242,6 @@ async function startWA() {
 
             try { await sock.readMessages([m.key]); } catch {}
             
-            // Processa fluxo
             let reply = "";
             try { reply = await flow.handleText(jid, text); } 
             catch (e) { logger.error(e, "Erro fluxo"); }
@@ -265,13 +272,10 @@ app.post("/debug/force-restart", (req, res) => {
     res.json({ ok: true });
 });
 
-// ====== 8. WATCHDOG (Keep Alive) ======
-// Apenas monitora se travou de vez, não reinicia por qualquer coisa
+// ====== 8. WATCHDOG ======
 setInterval(() => {
     const now = Date.now();
-    // Se não receber Pong por 10 minutos, aí sim reinicia
     if (waReady && (now - lastPongAt > 600_000)) {
-        logger.warn("Sem resposta do servidor (Pong) há 10min. Reiniciando...");
         cleanupSock();
         startWA();
     }
