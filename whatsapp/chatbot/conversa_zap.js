@@ -19,70 +19,59 @@ const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 
-// Garante que as pastas existem antes de qualquer coisa
 try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
-// Logger criado no início para evitar erros de referência
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 app.use(express.json());
 
 // ====== 2. IMPORTAÇÃO SEGURA DO BAILEYS ======
-// Isso resolve os erros "is not a function" tentando todas as formas de importação
 const baileysModule = require("@whiskeysockets/baileys");
 
-// Função auxiliar para pegar o export correto (default ou nomeado)
-const getBaileysExport = (key) => {
+const getExport = (key) => {
   if (baileysModule[key]) return baileysModule[key];
   if (baileysModule.default && baileysModule.default[key]) return baileysModule.default[key];
   return undefined;
 };
 
-const useMultiFileAuthState = getBaileysExport("useMultiFileAuthState");
-const fetchLatestBaileysVersion = getBaileysExport("fetchLatestBaileysVersion");
-const makeInMemoryStore = getBaileysExport("makeInMemoryStore");
-const DisconnectReason = getBaileysExport("DisconnectReason");
-const Browsers = getBaileysExport("Browsers");
-const isJidGroup = getBaileysExport("isJidGroup");
-const isJidBroadcast = getBaileysExport("isJidBroadcast");
-const isJidStatusBroadcast = getBaileysExport("isJidStatusBroadcast");
-const isJidNewsletter = getBaileysExport("isJidNewsletter");
-const extractMessageContent = getBaileysExport("extractMessageContent");
-const jidNormalizedUser = getBaileysExport("jidNormalizedUser");
-const getContentType = getBaileysExport("getContentType");
+const useMultiFileAuthState = getExport("useMultiFileAuthState");
+const fetchLatestBaileysVersion = getExport("fetchLatestBaileysVersion");
+const makeInMemoryStore = getExport("makeInMemoryStore");
+const DisconnectReason = getExport("DisconnectReason");
+const Browsers = getExport("Browsers");
+const isJidGroup = getExport("isJidGroup");
+const isJidBroadcast = getExport("isJidBroadcast");
+const isJidStatusBroadcast = getExport("isJidStatusBroadcast");
+const isJidNewsletter = getExport("isJidNewsletter");
+const extractMessageContent = getExport("extractMessageContent");
+const jidNormalizedUser = getExport("jidNormalizedUser");
+const getContentType = getExport("getContentType");
 
-// A função principal de conexão
 const makeWASocket = baileysModule.default || baileysModule.makeWASocket || baileysModule;
 
-// Validação crítica
-if (!useMultiFileAuthState || !makeWASocket) {
-    throw new Error("CRÍTICO: Falha ao importar funções essenciais do Baileys.");
+if (typeof useMultiFileAuthState !== "function" || typeof makeWASocket !== "function") {
+  throw new Error("CRÍTICO: Funções essenciais do Baileys não encontradas.");
 }
 
-// ====== 3. MEMÓRIA (STORE) ======
-// É aqui que o bot vai lembrar que o ID do Web pertence ao seu número
+// ====== 3. MEMÓRIA (STORE) - CORAÇÃO DA TRADUÇÃO ======
 let store;
-if (makeInMemoryStore) {
+if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
-    // Tenta recuperar memória anterior do disco
     try { store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
-    // Salva periodicamente
     setInterval(() => {
         try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
     }, 10_000);
 } else {
-    logger.warn("⚠️ makeInMemoryStore não encontrado. Usando memória volátil simples.");
+    // Fallback simples caso a função não exista
+    logger.warn("⚠️ Usando memória simples (fallback).");
     store = {
         contacts: {},
         bind: (ev) => {
-            ev.on('contacts.upsert', (u) => { 
-                for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); 
-            });
-            ev.on('contacts.update', (u) => { 
-                for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); 
-            });
-        }
+            ev.on('contacts.upsert', (u) => { for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); });
+            ev.on('contacts.update', (u) => { for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); });
+        },
+        readFromFile: () => {}, writeToFile: () => {}
     };
 }
 
@@ -108,7 +97,7 @@ globalThis.__lastQR = "";
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
 
-// Sistema de Lock
+// Lock
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
 try { fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true }); } catch {}
@@ -157,14 +146,14 @@ function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
     const now = Date.now();
-    const stale = false; // Desativado restart por tempo
+    const stale = false; 
     const noPong = now - lastPongAt > PONG_GRACE_MS; 
     const wsDead = !(sock?.ws) || (sock?.ws?.readyState !== 1);
 
     try { if (sock?.ws?.readyState === 1) { sock.ws.ping?.(); } } catch {}
 
     if (noPong || stale || wsDead || !waReady) {
-      logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: reiniciando conexão...");
+      logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: restart");
       await safeStartWA(true);
     }
   }, PING_EVERY_MS);
@@ -204,21 +193,16 @@ async function startWA() {
     agent,             
     fetchAgent: agent, 
     markOnlineOnConnect: false,
-    syncFullHistory: true, // ESSENCIAL: Baixa contatos para saber quem é quem
+    syncFullHistory: true, // <--- ESSENCIAL
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
     shouldIgnoreJid: jid => {
       const j = String(jid);
-      const isG = isJidGroup ? isJidGroup(j) : j.endsWith("@g.us");
-      const isB = isJidBroadcast ? isJidBroadcast(j) : j.endsWith("@broadcast");
-      const isN = isJidNewsletter ? isJidNewsletter(j) : j.endsWith("@newsletter");
-      const isS = isJidStatusBroadcast ? isJidStatusBroadcast(j) : j === "status@broadcast";
-      return isG || isB || isS || isN;
+      return _isGroup(j) || _isBroadcast(j) || _isStatus(j) || _isNewsletter(j);
     }
   });
 
-  // Liga a memória ao socket para atualizar contatos
   if (store) store.bind(sock.ev);
   
   lastPongAt = Date.now();
@@ -231,29 +215,26 @@ async function startWA() {
     if (qr) {
       globalThis.__lastQR = qr;
       qrcode.generate(qr, { small: true });
-      logger.info("QR gerado/atualizado.");
     }
     if (connection === "open") {
       waReady = true;
       waLastOpen = Date.now();
-      logger.info("WA conectado com sucesso!");
+      logger.info("WA conectado.");
     }
     if (connection === "close") {
       const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
       waReady = false;
-      // Se foi logout manual, limpa a pasta
       if (status === DisconnectReason?.loggedOut) {
         try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
         fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
         setTimeout(() => safeStartWA(true), 1500);
       } else {
-        // Reconexão rápida
         setTimeout(() => safeStartWA(true), 2000);
       }
     }
   });
 
-  // ===== 8. HANDLER DE MENSAGENS =====
+  // ===== 8. HANDLER DE MENSAGENS (AQUI ESTÁ A PROTEÇÃO) =====
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       if (type !== "notify" || !messages?.length) return;
@@ -264,35 +245,44 @@ async function startWA() {
         handledMessageIds.add(msgId);
 
         const fromMe = !!m.key?.fromMe;
-        
-        // ID Bruto (pode ser Web @lid ou Celular @s.whatsapp.net)
         let jid = m.key?.remoteJid || "";
 
-        // ====== TRADUÇÃO SILENCIOSA DE WEB PARA CELULAR ======
-        // Objetivo: Nunca salvar @lid no banco. Sempre encontrar o número real.
-        if (jid.includes("@lid") && store && store.contacts) {
-             // Tenta achar o contato na memória baixada
-             const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-             const contact = store.contacts[lidKey];
-             
-             if (contact && contact.id && !contact.id.includes("@lid")) {
-                 // ACHAMOS! Substitui o ID estranho pelo número real
-                 // O usuário nem percebe, mas o banco recebe o número certo.
-                 jid = contact.id; 
-             } else {
-                 // Se não achou na memória (ainda não sincronizou?),
-                 // o jidNormalizedUser abaixo tenta fazer o melhor que pode.
-             }
+        // ====== TRAVA DE SEGURANÇA DO WEB (LID) ======
+        if (jid.includes("@lid")) {
+            let resolved = false;
+            
+            // Tenta achar o número real na memória
+            if (store && store.contacts) {
+                 const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
+                 const contact = store.contacts[lidKey];
+                 
+                 if (contact && contact.id && !contact.id.includes("@lid")) {
+                     jid = contact.id; // SUCESSO: ID substituído pelo número real
+                     resolved = true;
+                 }
+            }
+
+            // SE NÃO CONSEGUIU TRADUZIR, PARA TUDO!
+            if (!resolved) {
+                // Se formos nós mesmos (Web) mandando msg, precisamos avisar para usar o celular
+                // Se for o usuário, não conseguimos saber quem é sem o 'store'
+                
+                if (!fromMe) {
+                    logger.warn({ jid }, "LID não identificado. Solicitando sync via celular.");
+                    await sock.sendMessage(jid, { text: "🔄 *Atenção*\n\nIdentifiquei que você está usando o WhatsApp Web, mas o sistema ainda não sincronizou seu número.\n\nPor favor, envie um *'Oi'* usando seu **CELULAR** agora.\n\nIsso é necessário apenas uma vez para corrigir o cadastro." });
+                }
+                // AQUI É O SEGREDO: CONTINUE impede que o código salve o LID no banco
+                continue; 
+            }
         }
 
-        // Normalização padrão
+        // Normalização padrão (se passou pela trava, 'jid' já é o número real)
         if (jidNormalizedUser) jid = jidNormalizedUser(jid);
         
-        // Filtros finais
         if (!jid || jid.endsWith("@status")) continue;
 
         const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-        logger.info({ jid, ct }, "Mensagem Recebida (Processada)");
+        logger.info({ jid, ct }, "Mensagem processada (ID Real)");
 
         if (fromMe) continue;
 
@@ -319,7 +309,7 @@ async function startWA() {
 
         let reply = "";
         try {
-          // Agora passamos o 'jid' (já traduzido para número) para o fluxo
+          // Agora 'jid' é GARANTIDAMENTE o número de telefone
           reply = await flow.handleText(jid, text);
         } catch (e) {
           logger.error({ err: String(e) }, "Erro no fluxo");
@@ -331,7 +321,7 @@ async function startWA() {
         lastActivityAt = Date.now();
     }
     } catch (e) {
-      logger.error(e, "Erro no processamento da mensagem");
+      logger.error(e, "Erro upsert");
     }
   });
 }
@@ -345,21 +335,21 @@ app.get("/qr", (_req, res) => {
   res.set("content-type","text/html");
   res.end(`<div id="qrcode"></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><script>new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(qr)}, width: 300, height: 300 });</script>`);
 });
-app.get("/test/wa", async (req, res) => {
-  try { res.json({ id: await sendWA(req.query.to, req.query.text || "Teste") }); }
-  catch (e) { res.status(500).json({ error: String(e) }); }
-});
 app.post("/debug/force-restart", async (_req, res) => {
   await safeStartWA(true);
   res.json({ ok: true });
+});
+app.get("/test/wa", async (req, res) => {
+  try { res.json({ id: await sendWA(req.query.to, req.query.text || "Teste") }); }
+  catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
 // ====== 10. BOOT ======
 (async () => {
   armWaWatchdog();
   await safeStartWA(true);
-  logger.info({ PORT, DATA_DIR, WA_AUTH_DIR }, "ZapBot Iniciado com Sucesso");
-  app.listen(PORT, () => logger.info({ PORT }, "Servidor HTTP rodando"));
+  logger.info({ PORT, DATA_DIR, WA_AUTH_DIR }, "ZapBot Iniciado");
+  app.listen(PORT, () => logger.info({ PORT }, "HTTP Server up"));
 })();
 
 process.on("unhandledRejection", (e) => logger.error({ err: String(e) }, "unhandledRejection"));
