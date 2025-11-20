@@ -144,7 +144,7 @@ function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
     const now = Date.now();
-    const stale = now - waLastOpen > 4 * 60 * 1000; // sem "open" fresco
+    const stale = false; // <--- Desativamos essa regra suicida
     const noPong = now - lastPongAt > PONG_GRACE_MS; // sem pong tempo demais
     const wsDead = !(sock?.ws) || (sock?.ws?.readyState !== 1);
 
@@ -311,14 +311,20 @@ async function startWA() {
         handledMessageIds.add(msgId);
 
         const fromMe = !!m.key?.fromMe;
-        let jid = m.key?.remoteJid || "";
-        if (!jid || jid.endsWith("@status")) continue;
+        // ... código anterior ...
+
+        // BLOQUEIO DE LID (Para garantir que pegamos o número real)
+        if (jid.includes("@lid")) {
+            // Se for mensagem do usuário (não do bot), avisa ele
+            if (!fromMe) {
+              console.log("Ignorando mensagem de @lid:", jid);
+              await sock.sendMessage(jid, { text: "⚠️ *Aviso do Sistema*\n\nPor favor, envie a primeira mensagem usando o seu **Celular** (App do Android/iOS).\n\nO WhatsApp Web envia um código temporário que impede seu cadastro correto." });
+            }
+            continue; 
+        }
         
-        // --- FIX PARA FORÇAR NÚMERO DE TELEFONE ---
-        // Remove sufixo de dispositivo (ex: :12@...) mantendo o domínio original
-        jid = jid.replace(/:\d+@/, "@"); 
+        // ... continua o código ...
         
-        // Se mesmo assim vier @lid, a gente tenta ignorar ou logar (mas geralmente o fix acima resolve)
         if (jid.endsWith("@lid")) {
             logger.warn({ jid }, "JID recebido é LID. Ignorando mensagem para evitar cadastro errado.");
             continue; 
