@@ -14,6 +14,7 @@ import WebSocket from "ws";
 const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
+  makeInMemoryStore,
   DisconnectReason,
   Browsers,
   isJidGroup,
@@ -24,6 +25,13 @@ const {
   jidNormalizedUser,
   getContentType
 } = baileys;
+
+// ====== STORE (Memória de Contatos) ======
+const store = makeInMemoryStore({ logger });
+store.readFromFile(path.join(DATA_DIR, 'baileys_store.json'));
+ setInterval(() => {
+   store.writeToFile(path.join(DATA_DIR, 'baileys_store.json'));
+}, 10_000);
 
 const _isGroup = j => (isJidGroup?.(j)) || String(j).endsWith("@g.us");
 const _isBroadcast = j => (isJidBroadcast?.(j)) || String(j).endsWith("@broadcast");
@@ -218,6 +226,8 @@ async function startWA() {
     }
   });
 
+  store.bind(sock.ev);
+
   lastPongAt = Date.now();
   lastActivityAt = Date.now();
 
@@ -311,21 +321,28 @@ async function startWA() {
 
         const fromMe = !!m.key?.fromMe;
         
-        // 1. PRIMEIRO: Define o JID (Cria a variável)
+        // 1. Define o JID bruto
         let jid = m.key?.remoteJid || "";
-        
-        // 2. SEGUNDO: Verifica se é válido
-        if (!jid || jid.endsWith("@status")) continue;
 
+        // 2. Fix para converter LID (Web) em Número Real usando a Store
+        if (jid.includes("@lid")) {
+            const contact = store.contacts[jidNormalizedUser(jid)];
+            if (contact && contact.id && !contact.id.includes("@lid")) {
+                jid = contact.id; // Achou! Usa o número real
+            } 
+        }
 
-        // 4. QUARTO: Normaliza para garantir formato padrão (se passar pelo filtro acima)
+        // 3. Normaliza final
         jid = jidNormalizedUser(jid);
+        
+        // 4. Verifica se é válido
+        if (!jid || jid.endsWith("@status")) continue;
 
         const ct = getContentType(m.message);
         logger.info({ type, fromMe, jid, ct, msgId }, "RX upsert");
 
         if (fromMe) continue;
-
+  
         // ... (O restante do código continua igual: extrair texto, readMessages, flow.handleText, etc.)
         const content = extractMessageContent(m.message) || {};
         const text =
