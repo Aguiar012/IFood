@@ -313,7 +313,17 @@ async function startWA() {
         const fromMe = !!m.key?.fromMe;
         let jid = m.key?.remoteJid || "";
         if (!jid || jid.endsWith("@status")) continue;
-        jid = jidNormalizedUser(jid);
+        
+        // --- FIX PARA FORÇAR NÚMERO DE TELEFONE ---
+        // Remove sufixo de dispositivo (ex: :12@...) mantendo o domínio original
+        jid = jid.replace(/:\d+@/, "@"); 
+        
+        // Se mesmo assim vier @lid, a gente tenta ignorar ou logar (mas geralmente o fix acima resolve)
+        if (jid.endsWith("@lid")) {
+            logger.warn({ jid }, "JID recebido é LID. Ignorando mensagem para evitar cadastro errado.");
+            continue; 
+        }
+        // ------------------------------------------
 
         const ct = getContentType(m.message);
         logger.info({ type, fromMe, jid, ct, msgId }, "RX upsert");
