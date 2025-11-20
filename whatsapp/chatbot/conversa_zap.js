@@ -15,7 +15,8 @@ import { createConversaFlow } from "./conversa_flow.js";
 
 // ====== 1. CONFIGURAÇÃO ======
 const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
-const PROXY_URL = process.env.PROXY_URL || "";
+// AQUI: O bot lê sua proxy do sistema. Se estiver configurada no Northflank, ele usa.
+const PROXY_URL = process.env.PROXY_URL || ""; 
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 
@@ -26,7 +27,7 @@ const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 app.use(express.json());
 
-// ====== 2. IMPORTAÇÃO SEGURA ======
+// ====== 2. IMPORTAÇÃO SEGURA (Sem erros de versão) ======
 const baileysModule = require("@whiskeysockets/baileys");
 const getExport = (key) => {
   if (baileysModule[key]) return baileysModule[key];
@@ -38,6 +39,7 @@ const useMultiFileAuthState = getExport("useMultiFileAuthState");
 const fetchLatestBaileysVersion = getExport("fetchLatestBaileysVersion");
 const makeInMemoryStore = getExport("makeInMemoryStore");
 const DisconnectReason = getExport("DisconnectReason");
+const Browsers = getExport("Browsers");
 const isJidGroup = getExport("isJidGroup");
 const isJidBroadcast = getExport("isJidBroadcast");
 const isJidStatusBroadcast = getExport("isJidStatusBroadcast");
@@ -51,7 +53,8 @@ if (!useMultiFileAuthState || !makeWASocket) {
   throw new Error("CRÍTICO: Funções do Baileys não encontradas.");
 }
 
-// ====== 3. MEMÓRIA PERSISTENTE ======
+// ====== 3. MEMÓRIA (STORE) ======
+// Mantemos a memória para ajudar, mas a regra de bloqueio será soberana
 let store;
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
@@ -60,13 +63,7 @@ if (typeof makeInMemoryStore === 'function') {
         try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
     }, 10_000);
 } else {
-    store = {
-        contacts: {},
-        bind: (ev) => {
-            ev.on('contacts.upsert', (u) => { for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); });
-            ev.on('contacts.update', (u) => { for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); });
-        }
-    };
+    store = { contacts: {}, bind: () => {}, readFromFile: () => {}, writeToFile: () => {} };
 }
 
 // ====== 4. FLUXO ======
@@ -76,6 +73,7 @@ const flow = createConversaFlow({ dataDir: DATA_DIR, dbUrl: process.env.DATABASE
 let sock = null;
 let waReady = false;
 let waLastOpen = 0;
+let wdTimer = null;
 let startingWA = false;
 let lastPongAt = 0;
 let lastActivityAt = 0; 
@@ -99,7 +97,12 @@ async function buildProxyAgent(url) {
   if (__proxyAgent) return __proxyAgent;
   const { HttpsProxyAgent } = await import("https-proxy-agent");
   __proxyAgent = new HttpsProxyAgent(url);
+  logger.info({ proxy: maskProxy(url) }, "Usando Proxy Residencial para conexão");
   return __proxyAgent;
+}
+function maskProxy(u){
+  try{ const m = new URL(u); if(m.username) m.username="****"; if(m.password) m.password="****"; return m.toString(); }
+  catch{ return "****"; }
 }
 
 // Utils
@@ -121,7 +124,7 @@ function cleanupSock() {
   sock = null;
 }
 
-// ====== 6. WATCHDOG ======
+// ====== 6. WATCHDOG (Monitoramento Suave) ======
 const PING_EVERY_MS = 300_000; 
 const PONG_GRACE_MS = 600_000; 
 
@@ -129,6 +132,7 @@ function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
     const now = Date.now();
+    // stale = false impede que ele reinicie sozinho por tempo
     const stale = false; 
     const noPong = now - lastPongAt > PONG_GRACE_MS; 
     const wsDead = !(sock?.ws) || (sock?.ws?.readyState !== 1);
@@ -136,7 +140,7 @@ function armWaWatchdog() {
     try { if (sock?.ws?.readyState === 1) { sock.ws.ping?.(); } } catch {}
 
     if (noPong || stale || wsDead || !waReady) {
-      logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: restart");
+      logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: reiniciando conexão...");
       await safeStartWA(true);
     }
   }, PING_EVERY_MS);
@@ -229,47 +233,44 @@ async function startWA() {
             const fromMe = !!m.key?.fromMe;
             let jid = m.key?.remoteJid || "";
 
-            // 1. TRUQUE DE MESTRE: Se for VOCÊ (fromMe), usa o ID da conexão
-            // Isso resolve o teste do dono imediatamente.
-            if (fromMe && sock.user?.id) {
-                 // O ID do user vem tipo '55119999:2@s.whatsapp.net'
-                 // jidNormalizedUser limpa isso para o número puro.
-                 jid = jidNormalizedUser(sock.user.id);
-            }
-            
-            // 2. Tenta traduzir LID para outros usuários
-            else if (jid.includes("@lid")) {
+            // ====== REGRA DE OURO: BLOQUEIO DE WEB ======
+            // Se a mensagem vier com @lid (Web)
+            if (jid.includes("@lid")) {
                 let resolved = false;
-                const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-
+                
+                // 1. Tenta salvar quem já é conhecido (tem na memória)
                 if (store && store.contacts) {
-                     let contact = store.contacts[lidKey];
+                     const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
+                     const contact = store.contacts[lidKey] || store.contacts[jid];
+                     
+                     // Se achou o contato e ele tem um número real vinculado, libera
                      if (contact && contact.id && !contact.id.includes("@lid")) {
                          jid = contact.id;
                          resolved = true;
                      }
-                     
-                     // Busca reversa se falhar
-                     if (!resolved) {
-                        const all = Object.values(store.contacts);
-                        const found = all.find(c => c.lid === lidKey);
-                        if (found && found.id && !found.id.includes("@lid")) {
-                             jid = found.id;
-                             resolved = true;
-                        }
-                     }
                 }
-                // Se falhar a tradução de terceiros, ele segue (sem bloquear)
-                // mas se for você, o passo 1 já garantiu o número certo.
+                
+                // 2. Se não resolveu (usuário novo no Web), BLOQUEIA e AVISA
+                if (!resolved) {
+                    // Só manda aviso se for o usuário falando, pra não criar loop
+                    if (!fromMe) {
+                        logger.warn({ jid }, "🚫 Cadastro Web Bloqueado. Solicitando celular.");
+                        await sock.sendMessage(jid, { 
+                            text: "🚫 *Ação Necessária*\n\nPara sua segurança e funcionamento correto do sistema, o **primeiro contato/cadastro** deve ser feito pelo **Celular** (App Android/iOS).\n\nPor favor, envie um *'Oi'* pelo seu celular. Depois disso, o WhatsApp Web funcionará normalmente." 
+                        });
+                    }
+                    // 'continue' faz pular todo o resto. Não processa, não salva no banco.
+                    continue; 
+                }
             }
 
             // Normalização final
             if (jidNormalizedUser) jid = jidNormalizedUser(jid);
-            
             if (!jid || jid.endsWith("@status")) continue;
 
+            // Se passou daqui, 'jid' é um número de telefone válido (ou grupo)
             const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-            logger.info({ jid, ct }, "Mensagem processada");
+            logger.info({ jid, ct }, "Mensagem processada (ID Real/Celular)");
 
             if (fromMe) continue;
 
