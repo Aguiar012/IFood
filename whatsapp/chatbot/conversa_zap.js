@@ -207,7 +207,7 @@ async function startWA() {
     agent,             // WSS via proxy
     fetchAgent: agent, // HTTP via proxy
     markOnlineOnConnect: false,
-    syncFullHistory: false,
+    syncFullHistory: true,
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
@@ -317,15 +317,6 @@ async function startWA() {
         // 2. SEGUNDO: Verifica se é válido
         if (!jid || jid.endsWith("@status")) continue;
 
-        // 3. TERCEIRO: Verifica e bloqueia o LID (WhatsApp Web ID)
-        if (jid.includes("@lid")) {
-            if (!fromMe) {
-                logger.warn({ jid }, "Ignorando JID do tipo LID (Web) para evitar cadastro duplicado.");
-                // Opcional: avisar o usuário para usar o celular
-                // await sock.sendMessage(jid, { text: "Por favor, mande um 'Oi' pelo celular para validar seu cadastro." });
-            }
-            continue; 
-        }
 
         // 4. QUARTO: Normaliza para garantir formato padrão (se passar pelo filtro acima)
         jid = jidNormalizedUser(jid);
