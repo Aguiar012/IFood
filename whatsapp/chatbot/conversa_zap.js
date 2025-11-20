@@ -7,18 +7,20 @@ import fs from "fs";
 import path from "path";
 import https from "https";
 import { createRequire } from "module";
-const require = createRequire(import.meta.url);
 import WebSocket from "ws";
-
 import paths from "../paths.js";
 import { createConversaFlow } from "./conversa_flow.js";
 
-// ====== 1. CONFIGURAÇÃO ======
+// --- 1. DEFINE REQUIRE DEPOIS DOS IMPORTS ---
+const require = createRequire(import.meta.url);
+
+// --- 2. CONFIGURAÇÃO ---
 const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 
+// Garante pastas
 try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
@@ -26,33 +28,28 @@ const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 app.use(express.json());
 
-// ====== 2. IMPORTAÇÃO SEGURA ======
+// --- 3. IMPORTAÇÃO DO BAILEYS ---
 const baileysModule = require("@whiskeysockets/baileys");
-const getExport = (key) => {
-  if (baileysModule[key]) return baileysModule[key];
-  if (baileysModule.default && baileysModule.default[key]) return baileysModule.default[key];
-  return undefined;
-};
+const baileys = baileysModule.default || baileysModule;
 
-const useMultiFileAuthState = getExport("useMultiFileAuthState");
-const fetchLatestBaileysVersion = getExport("fetchLatestBaileysVersion");
-const makeInMemoryStore = getExport("makeInMemoryStore");
-const DisconnectReason = getExport("DisconnectReason");
-const isJidGroup = getExport("isJidGroup");
-const isJidBroadcast = getExport("isJidBroadcast");
-const isJidStatusBroadcast = getExport("isJidStatusBroadcast");
-const isJidNewsletter = getExport("isJidNewsletter");
-const extractMessageContent = getExport("extractMessageContent");
-const jidNormalizedUser = getExport("jidNormalizedUser");
-const getContentType = getExport("getContentType");
-const makeWASocket = baileysModule.default || baileysModule.makeWASocket || baileysModule;
+const {
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  makeInMemoryStore,
+  DisconnectReason,
+  Browsers,
+  isJidGroup,
+  isJidBroadcast,
+  isJidStatusBroadcast,
+  isJidNewsletter,
+  extractMessageContent,
+  jidNormalizedUser,
+  getContentType
+} = baileys;
 
-if (!useMultiFileAuthState || !makeWASocket) {
-  throw new Error("CRÍTICO: Funções do Baileys não encontradas.");
-}
-
-// ====== 3. MEMÓRIA ======
+// --- 4. MEMÓRIA (STORE) ---
 let store;
+// Tenta usar a memória nativa ou cria uma simples se falhar
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
     try { store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
@@ -63,19 +60,19 @@ if (typeof makeInMemoryStore === 'function') {
     store = {
         contacts: {},
         bind: (ev) => {
-            ev.on('contacts.upsert', (u) => { for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); });
-            ev.on('contacts.update', (u) => { for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); });
+            ev.on('contacts.upsert', (u) => { 
+                for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); 
+            });
+            ev.on('contacts.update', (u) => { 
+                for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); 
+            });
         }
     };
 }
 
-// ====== 4. FLUXO ======
-const flow = createConversaFlow({ dataDir: DATA_DIR, dbUrl: process.env.DATABASE_URL, logger });
-
-// ====== 5. ESTADO ======
+// --- 5. VARIAVEIS DE ESTADO ---
 let sock = null;
 let waReady = false;
-let waLastOpen = 0;
 let startingWA = false;
 let lastPongAt = 0;
 let lastActivityAt = 0; 
@@ -83,6 +80,9 @@ globalThis.__lastQR = "";
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
 
+const flow = createConversaFlow({ dataDir: DATA_DIR, dbUrl: process.env.DATABASE_URL, logger });
+
+// Lock File
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
 try { fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true }); } catch {}
@@ -104,17 +104,24 @@ async function buildProxyAgent(url) {
 
 // Utils
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-function toJid(to){
-  if (!to) throw new Error("vazio");
-  return (to.endsWith("@s.whatsapp.net") || to.endsWith("@g.us")) ? to : `${to.replace(/\D/g,"")}@s.whatsapp.net`;
-}
+
+// Função segura de envio (evita o crash 'null')
 async function sendWA(to, text){
-  if (!waReady || !sock) throw new Error("WhatsApp desconectado"); // Proteção contra null
-  const jid = toJid(to);
-  const sent = await sock.sendMessage(jid, { text });
-  lastActivityAt = Date.now();
-  return sent?.key?.id;
+  if (!waReady || !sock) {
+      // Se não estiver conectado, não tenta enviar para não crashar
+      return null;
+  }
+  try {
+      const jid = (to.endsWith("@s.whatsapp.net") || to.endsWith("@g.us")) ? to : `${to.replace(/\D/g,"")}@s.whatsapp.net`;
+      const sent = await sock.sendMessage(jid, { text });
+      lastActivityAt = Date.now();
+      return sent?.key?.id;
+  } catch (e) {
+      logger.error({ err: String(e) }, "Erro ao enviar mensagem");
+      return null;
+  }
 }
+
 function cleanupSock() {
   try { sock?.end?.(); } catch {}
   try { sock?.ws?.close?.(); } catch {}
@@ -122,54 +129,40 @@ function cleanupSock() {
   waReady = false;
 }
 
-// ====== 6. WATCHDOG ======
+// --- 6. WATCHDOG ---
 const PING_EVERY_MS = 300_000; 
 const PONG_GRACE_MS = 600_000; 
-
 function armWaWatchdog() {
-  if (wdTimer) return;
-  wdTimer = setInterval(async () => {
+  setInterval(async () => {
     const now = Date.now();
-    const stale = false; 
     const noPong = now - lastPongAt > PONG_GRACE_MS; 
     const wsDead = !(sock?.ws) || (sock?.ws?.readyState !== 1);
 
     try { if (sock?.ws?.readyState === 1) { sock.ws.ping?.(); } } catch {}
 
-    if (noPong || stale || wsDead || !waReady) {
-      logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: restart");
-      await safeStartWA(true);
+    if (noPong || wsDead) {
+      if (waReady) {
+          logger.warn("Watchdog: Conexão perdida. Reiniciando...");
+          await safeStartWA(true);
+      }
     }
   }, PING_EVERY_MS);
 }
 
-let _saveCredsRef = async () => {};
-let _sigHooked = false;
-function registerSaveCreds(fn){
-  _saveCredsRef = fn;
-  if (_sigHooked) return;
-  _sigHooked = true;
-  for (const sig of ["SIGINT","SIGTERM"]) {
-    process.on(sig, async () => { try { await _saveCredsRef(); } catch {} process.exit(0); });
-  }
-}
-
 async function safeStartWA(force = false) {
-  if (startingWA && !force) return;
   if (startingWA) return;
   startingWA = true;
   try { cleanupSock(); await startWA(); } finally { startingWA = false; }
 }
 
-// ====== 7. START WA ======
+// --- 7. START WA ---
 async function startWA() {
   try {
       const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
-      registerSaveCreds(saveCreds);
       const { version } = await fetchLatestBaileysVersion();
       const agent = await buildProxyAgent(PROXY_URL);
 
-      sock = makeWASocket({
+      sock = baileys.makeWASocket({
         version,
         auth: state,
         logger,
@@ -182,11 +175,15 @@ async function startWA() {
         printQRInTerminal: false,
         shouldIgnoreJid: jid => {
           const j = String(jid);
-          return (isJidGroup && isJidGroup(j)) || (isJidBroadcast && isJidBroadcast(j)) || (isJidNewsletter && isJidNewsletter(j));
+          // Verifica se as funcoes existem antes de chamar (proteção extra)
+          const isG = isJidGroup ? isJidGroup(j) : j.endsWith("@g.us");
+          const isB = isJidBroadcast ? isJidBroadcast(j) : j.endsWith("@broadcast");
+          const isN = isJidNewsletter ? isJidNewsletter(j) : j.endsWith("@newsletter");
+          return isG || isB || isN;
         }
       });
 
-      if (store) store.bind(sock.ev);
+      if (store && store.bind) store.bind(sock.ev);
       
       sock.ev.on("creds.update", saveCreds);
 
@@ -194,11 +191,10 @@ async function startWA() {
         if (qr) {
           globalThis.__lastQR = qr;
           qrcode.generate(qr, { small: true });
-          logger.info("QR Code pronto.");
+          logger.info("QR Code gerado.");
         }
         if (connection === "open") {
           waReady = true;
-          waLastOpen = Date.now();
           lastPongAt = Date.now();
           logger.info("✅ WhatsApp CONECTADO!");
         }
@@ -229,105 +225,50 @@ async function startWA() {
 
             const fromMe = !!m.key?.fromMe;
             let jid = m.key?.remoteJid || "";
-  
-            // 1. Se for LID, tenta resolver para o JID com número usando a store
-            if (jid.includes("@lid") && store && store.contacts) {
-              const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-            
-              let contact = null;
-            
-              const contactsObj = store.contacts;
-            
-              // Caso a store use Map (versões mais novas do Baileys)
-              if (contactsObj && typeof contactsObj.get === "function") {
-                for (const c of contactsObj.values()) {
-                  if (!c) continue;
-                  const cLid = c.lid || c.lidJid || c.lidUser;
-                  if (cLid && jidNormalizedUser(cLid) === lidKey) {
-                    contact = c;
-                    break;
-                  }
+
+            // --- TENTATIVA DE TRADUÇÃO WEB -> CELULAR ---
+            if (jid.includes("@lid")) {
+                let resolved = false;
+                const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
+
+                // 1. Se for o próprio bot (você no Web), pega da conexão
+                if (fromMe && sock.user?.id) {
+                    const myJid = jidNormalizedUser ? jidNormalizedUser(sock.user.id) : sock.user.id;
+                    if (!myJid.includes("@lid")) {
+                        jid = myJid;
+                        resolved = true;
+                    }
                 }
-              } else {
-                // Caso seja um objeto plano { jid: contact }
-                const all = Object.values(contactsObj || {});
-                contact = all.find(c => {
-                  if (!c) return false;
-                  const cLid = c.lid || c.lidJid || c.lidUser;
-                  return cLid && jidNormalizedUser(cLid) === lidKey;
-                });
-              }
-            
-              if (contact && contact.id && !contact.id.includes("@lid")) {
-                // Aqui finalmente viramos 43852...@lid em 5511...@s.whatsapp.net
-                jid = contact.id;
-              }
+
+                // 2. Tenta a memória (Store)
+                if (!resolved && store && store.contacts) {
+                     let contact = store.contacts[lidKey];
+                     if (contact && contact.id && !contact.id.includes("@lid")) {
+                         jid = contact.id;
+                         resolved = true;
+                     }
+                     // 3. Busca profunda
+                     if (!resolved) {
+                        const all = Object.values(store.contacts);
+                        const found = all.find(c => c.lid === lidKey);
+                        if (found && found.id && !found.id.includes("@lid")) {
+                             jid = found.id;
+                             resolved = true;
+                        }
+                     }
+                }
+                // SE NÃO RESOLVEU, SEGUE ASSIM MESMO (SEM BLOQUEIO)
+                if (!resolved) {
+                    logger.info({ jid }, "LID não traduzido. Usando ID original.");
+                }
             }
-            
-            // Normalização final (remove device, etc)
+
             if (jidNormalizedUser) jid = jidNormalizedUser(jid);
             if (!jid || jid.endsWith("@status")) continue;
 
+            // Ignora mensagens antigas ou de sistema
+            if (m.messageStubType) continue;
 
-            const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-            logger.info({ jid, ct }, "Mensagem processada");
-
-            if (fromMe) continue;
+            if (fromMe) continue; // Bot não fala sozinho
 
             const content = extractMessageContent ? extractMessageContent(m.message) : m.message;
-            const text = content?.conversation || content?.extendedTextMessage?.text || "";
-
-            if (!text) continue;
-
-            try { await sock.readMessages([m.key]); } catch {}
-            
-            let reply = "";
-            try { reply = await flow.handleText(jid, text); } 
-            catch (e) { logger.error(e, "Erro fluxo"); }
-            
-            // Proteção contra envio sem conexão
-            if (reply && sock && waReady) {
-                await sock.sendMessage(jid, { text: reply });
-                lastActivityAt = Date.now();
-            }
-        }
-      });
-
-  } catch (e) {
-      logger.error(e, "Erro fatal no startWA");
-      setTimeout(() => startWA(), 10000);
-  } finally {
-      startingWA = false;
-  }
-}
-
-// ====== 7. ROTAS ======
-app.get("/", (req, res) => res.send("ok"));
-app.get("/qr", (req, res) => {
-  const qr = globalThis.__lastQR;
-  if (!qr) return res.send("Aguarde o QR...");
-  res.send(`<div id="qrcode"></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><script>new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(qr)}, width: 300, height: 300 });</script>`);
-});
-app.post("/debug/force-restart", (req, res) => {
-    cleanupSock();
-    setTimeout(() => startWA(), 1000);
-    res.json({ ok: true });
-});
-
-// ====== 8. WATCHDOG ======
-setInterval(() => {
-    const now = Date.now();
-    if (waReady && (now - lastPongAt > 600_000)) {
-        cleanupSock();
-        startWA();
-    }
-}, 60_000);
-
-// Start
-(async () => {
-  await startWA();
-  app.listen(PORT, () => logger.info({ PORT }, "Servidor Online"));
-})();
-
-process.on("unhandledRejection", (e) => logger.error(e));
-process.on("uncaughtException", (e) => logger.error(e));
