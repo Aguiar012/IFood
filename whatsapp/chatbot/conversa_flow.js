@@ -177,7 +177,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     saveState();
   }
 
-  // --- helper para envio de e-mail de cancelamento ---
+// --- helper para envio de e-mail de cancelamento ---
   async function sendCancelEmail({ aluno, alvoDate, phone }) {
     if (!mailTransporter || !CAE_EMAIL) {
       logger.error("E-mail de cancelamento não configurado (GMAIL_USER / GMAIL_APP_PASSWORD / CAE_EMAIL).");
@@ -189,27 +189,45 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     const nome = aluno.nome || "Aluno";
     const prontBase = String(aluno.prontuario || "").toUpperCase();
     const prontCompleto = prontBase.startsWith("PT") ? prontBase : `PT${prontBase}`;
+    const prontNumerico = onlyDigits(prontBase); // Apenas números para cópia fácil
     const tel = phone || "";
 
-    const subject = `[IFSP Pirituba] Cancelamento de almoço - ${prontCompleto} - ${dataStr}`;
-    const text =
-`Solicitação automática de cancelamento de almoço
+    const subject = `Cancelamento de almoço - ${prontCompleto} - ${dataStr}`;
+    
+    // Corpo em HTML para melhor visualização e facilidade
+    const html = `
+      <div style="font-family: Arial, sans-serif; color: #333;">
+        <h2 style="color: #d9534f;">Solicitação de Cancelamento de Almoço</h2>
+        <p><strong>Aluno:</strong> ${nome}</p>
+        <p><strong>Prontuário:</strong> ${prontCompleto}</p>
+        
+        <div style="background-color: #f8f9fa; border: 1px solid #ddd; padding: 15px; margin: 20px 0; border-radius: 5px;">
+          <p style="margin: 0 0 10px;">Para copiar o prontuário (apenas números):</p>
+          <span style="font-size: 24px; font-weight: bold; letter-spacing: 2px; background: #fff; padding: 5px 10px; border: 1px dashed #999;">
+            ${prontNumerico}
+          </span>
+        </div>
 
-Aluno: ${nome}
-Prontuário: ${prontCompleto}
-Telefone (WhatsApp): ${tel}
+        <p><strong>Data a cancelar:</strong> ${diaSemana}, ${dataStr}</p>
+        <p><strong>Telefone (WhatsApp):</strong> <a href="https://wa.me/${tel}">${tel}</a></p>
+        
+        <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+        <p style="font-size: 12px; color: #777;">
+          Mensagem gerada automaticamente pelo Assistente de Almoço (piloto 2º ano Redes).
+        </p>
+      </div>
+    `;
 
-Dia do almoço a cancelar: ${diaSemana}, ${dataStr}
-
-Mensagem gerada pelo Assistente de Almoço (piloto 2º ano Redes).
-Por favor, considerar o cancelamento de acordo com as regras da CAE.`;
+    // Mantemos o texto puro como fallback
+    const text = `Solicitação de cancelamento:\nAluno: ${nome}\nProntuário: ${prontNumerico}\nData: ${dataStr}`;
 
     try {
       await mailTransporter.sendMail({
         from: `"Assistente de Almoço IFSP Pirituba" <${GMAIL_USER}>`,
         to: CAE_EMAIL,
         subject,
-        text,
+        text, // Fallback texto puro
+        html, // Versão HTML rica
       });
       logger.info?.("E-mail de cancelamento enviado com sucesso para", CAE_EMAIL);
       return { ok: true };
