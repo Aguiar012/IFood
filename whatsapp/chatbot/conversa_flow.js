@@ -600,14 +600,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
               "Se isso estiver errado, procure a CAE ou o responsável pelo projeto."
             );
           }
-
-          return (
-            header(null, null) +
-            "Tive um problema ao salvar seu cadastro.\n" +
-            "Tenta novamente mais tarde ou fala com o responsável pelo projeto."
-          );
         }
-
+        
         const alunoBanco = {
           nome: res.aluno?.nome,
           prontuario: res.aluno?.prontuario,
@@ -626,14 +620,16 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           "• Enviar *Bloquear* para registrar pratos que não come.\n\n" +
           "Envie *Ajuda* para ver o menu completo."
         );
-      }
+      } // Fecha if (u.step === "ASK_DIAS_REG")
 
       // fallback enquanto não cadastrado
       return ONBOARDING;
-    }
+    } // <--- AQUI ESTAVA O PERIGO: Esta chave fecha o if (!aluno)
 
     // ================= aluno já conhecido =================
+    // O código continua DENTRO da função handleText aqui
     const alunoAtual = aluno;
+
 
     if (u.step === "SET_DIAS") {
       const dias = parseDiasLista(text);
