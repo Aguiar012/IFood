@@ -10,17 +10,27 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 import WebSocket from "ws";
 
-// --- CORREÇÃO DA IMPORTAÇÃO DO BAILEYS ---
+// ====== 1. CONFIGURAÇÃO INICIAL (LOGGER E APP) ======
+// Definimos o logger primeiro para evitar erros de inicialização
+import paths from "../paths.js";
+import { createConversaFlow } from "./conversa_flow.js";
+
+const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
+const PROXY_URL = process.env.PROXY_URL || "";
+const DATA_DIR = process.env.DATA_DIR || "/app/data";
+const WA_AUTH_DIR = paths.WA_AUTH_DIR;
+
+// Garante pastas
+try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+
+const logger = P({ level: process.env.LOG_LEVEL || "info" });
+const app = express();
+app.use(express.json());
+
+// ====== 2. IMPORTAÇÃO SEGURA DO BAILEYS ======
 const baileysModule = require("@whiskeysockets/baileys");
-// Tenta pegar do .default (comum em ESM/TS) ou do módulo direto
 const baileys = baileysModule.default || baileysModule;
-
-// Garante que pegamos a função, não importa onde ela esteja
-const makeInMemoryStore = baileys.makeInMemoryStore || baileysModule.makeInMemoryStore;
-
-if (typeof makeInMemoryStore !== 'function') {
-  throw new Error("CRÍTICO: Não foi possível encontrar a função 'makeInMemoryStore' no Baileys. Verifique a versão da lib.");
-}
 
 const {
   useMultiFileAuthState,
@@ -36,54 +46,62 @@ const {
   getContentType
 } = baileys;
 
-const _isGroup = j => (isJidGroup?.(j)) || String(j).endsWith("@g.us");
-const _isBroadcast = j => (isJidBroadcast?.(j)) || String(j).endsWith("@broadcast");
-const _isStatus = j => (isJidStatusBroadcast?.(j)) || String(j) === "status@broadcast";
-const _isNewsletter = j => (isJidNewsletter?.(j)) || String(j).endsWith("@newsletter");
+// ====== 3. MEMÓRIA BLINDADA (FALLBACK) ======
+// Tenta pegar a função original. Se não existir, cria uma versão simples.
+let makeStoreFunc = baileys.makeInMemoryStore || baileysModule.makeInMemoryStore;
 
-import paths from "../paths.js";
-import { createConversaFlow } from "./conversa_flow.js";
-
-// ====== ENV ======
-const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
-const PROXY_URL = process.env.PROXY_URL || "";
-const DATA_DIR = process.env.DATA_DIR || "/app/data";
-const WA_AUTH_DIR = paths.WA_AUTH_DIR;
-// Garante que a pasta existe antes de tudo
-try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
-
-// janelas de saúde
-const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "10");
-const PING_EVERY_MS = 300_000; 
-const PONG_GRACE_MS = 600_000; 
-
-// ====== 1. LOGGER (TEM QUE SER O PRIMEIRO) ======
-const logger = P({ level: process.env.LOG_LEVEL || "info" });
-const app = express();
-app.use(express.json());
-
-// ====== 2. STORE (MEMÓRIA) ======
-// Agora é seguro criar porque logger já existe e makeInMemoryStore foi validado
-const store = makeInMemoryStore({ logger });
-try {
-  store.readFromFile(path.join(DATA_DIR, 'baileys_store.json'));
-} catch (err) {
-  logger.info("Store nova iniciada (sem arquivo anterior).");
+if (typeof makeStoreFunc !== 'function') {
+  logger.warn("⚠️ makeInMemoryStore não encontrado na lib. Usando versão interna simplificada.");
+  
+  // Versão caseira para garantir que o bot suba e traduza LIDs
+  makeStoreFunc = ({ logger }) => {
+    return {
+      contacts: {},
+      bind: (ev) => {
+        ev.on('contacts.upsert', (updates) => {
+          for (const c of updates) {
+            if (c.id) {
+              // Guarda o contato na memória
+              // Se for LID, isso nos ajuda a achar o número real depois
+              store.contacts[c.id] = Object.assign(store.contacts[c.id] || {}, c);
+            }
+          }
+        });
+        ev.on('contacts.update', (updates) => {
+          for (const c of updates) {
+            if (c.id && store.contacts[c.id]) {
+              Object.assign(store.contacts[c.id], c);
+            }
+          }
+        });
+      },
+      readFromFile: () => {}, // Funções vazias para não dar erro
+      writeToFile: () => {}
+    };
+  };
 }
+
+// Agora criamos a store com segurança
+const store = makeStoreFunc({ logger });
+if (store.readFromFile) {
+    try { store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
+}
+// Salva periodicamente (se suportado)
 setInterval(() => {
-  try {
-    store.writeToFile(path.join(DATA_DIR, 'baileys_store.json'));
-  } catch {}
+    if (store.writeToFile) {
+        try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
+    }
 }, 10_000);
 
-// ====== FLOW ======
+
+// ====== 4. FLUXO DO BOT ======
 const flow = createConversaFlow({
   dataDir: DATA_DIR,
   dbUrl: process.env.DATABASE_URL,
   logger
 });
 
-// ====== ESTADO ======
+// ====== 5. ESTADO E LOCK ======
 let sock = null;
 let waReady = false;
 let waLastOpen = 0;
@@ -95,10 +113,14 @@ let lastPongAt = 0;
 let lastActivityAt = 0; 
 globalThis.__lastQR = "";
 
+// Janelas de saúde
+const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "10");
+const PING_EVERY_MS = 300_000; 
+const PONG_GRACE_MS = 600_000; 
+
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
 
-// ====== LOCK ======
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
 try { fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true }); } catch {}
@@ -114,7 +136,7 @@ function writeLockSafe() {
 writeLockSafe();
 setInterval(writeLockSafe, 30_000);
 
-// ====== Proxy ======
+// ====== 6. PROXY ======
 let __proxyAgent;
 async function buildProxyAgent(url) {
   if (!url) return undefined;
@@ -129,7 +151,7 @@ function maskProxy(u){
   catch{ return "****"; }
 }
 
-// ====== Utils ======
+// ====== 7. UTILS ======
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 function toJid(to){
   if (!to) throw new Error("destinatário vazio");
@@ -151,7 +173,7 @@ function cleanupSock() {
   sock = null;
 }
 
-// ====== Watchdog ======
+// ====== 8. WATCHDOG ======
 function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
@@ -199,7 +221,7 @@ async function safeStartWA(force = false) {
   }
 }
 
-// ====== WhatsApp ======
+// ====== 9. START WA ======
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
   registerSaveCreds(saveCreds);
@@ -216,7 +238,7 @@ async function startWA() {
     agent,             
     fetchAgent: agent, 
     markOnlineOnConnect: false,
-    syncFullHistory: true, // <--- DOWNLOAD DE DADOS ATIVO
+    syncFullHistory: true, // ESSENCIAL PARA LIGAR O LID AO TELEFONE
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
@@ -226,7 +248,7 @@ async function startWA() {
     }
   });
 
-  // LIGA A MEMÓRIA AO SOCKET
+  // LIGA A MEMÓRIA AQUI
   store.bind(sock.ev);
 
   lastPongAt = Date.now();
@@ -265,9 +287,7 @@ async function startWA() {
       waReady = false;
 
       if (status === DisconnectReason.loggedOut) {
-        try {
-          fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true });
-        } catch {}
+        try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
         fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
         logger.warn({ status }, "Logout detectado — auth resetado, gere novo QR.");
         setTimeout(() => safeStartWA(true), 1500);
@@ -293,7 +313,7 @@ async function startWA() {
     }
   });
 
-  // ===== Inbound =====
+  // ===== 10. HANDLER DE MENSAGENS =====
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       if (type !== "notify") {
@@ -317,21 +337,19 @@ async function startWA() {
 
         const fromMe = !!m.key?.fromMe;
         
-        // 1. Pega o ID bruto
         let jid = m.key?.remoteJid || "";
 
-        // 2. Tenta traduzir LID -> Celular usando a memória (Store)
+        // --- FIX DO WHATSAPP WEB (LID) ---
+        // Se recebermos um ID estranho (@lid), perguntamos pra memória quem é esse cara
         if (jid.includes("@lid")) {
             const contact = store.contacts[jidNormalizedUser(jid)];
             if (contact && contact.id && !contact.id.includes("@lid")) {
-                jid = contact.id; // Achou! Usa o número real
+                // Achamos! É o número real que está salvo na memória
+                jid = contact.id; 
             } 
         }
 
-        // 3. Normaliza final
         jid = jidNormalizedUser(jid);
-        
-        // 4. Verifica se é válido
         if (!jid || jid.endsWith("@status")) continue;
 
         const ct = getContentType(m.message);
@@ -379,7 +397,7 @@ async function startWA() {
   });
 }
 
-// ====== Rotas HTTP ======
+// ====== 11. ROTAS HTTP ======
 app.get("/", (_req, res) => res.send("ok"));
 app.get("/health", (_req, res) => {
   const now = Date.now();
@@ -424,7 +442,7 @@ app.get("/test/wa", async (req, res) => {
   }
 });
 
-// ====== Boot ======
+// ====== 12. BOOT ======
 (async () => {
   armWaWatchdog();
   await safeStartWA(true);
