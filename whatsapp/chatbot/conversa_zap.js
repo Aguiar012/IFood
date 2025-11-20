@@ -10,17 +10,16 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 import WebSocket from "ws";
 
-// ====== 1. CONFIGURAÇÃO INICIAL (LOGGER E APP) ======
-// Definimos o logger primeiro para evitar erros de inicialização
 import paths from "../paths.js";
 import { createConversaFlow } from "./conversa_flow.js";
 
+// ====== 1. CONFIGURAÇÃO DE PASTAS ======
+// (Fazemos isso antes de tudo para evitar erros de 'path not found')
 const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 
-// Garante pastas
 try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
@@ -28,80 +27,82 @@ const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 app.use(express.json());
 
-// ====== 2. IMPORTAÇÃO SEGURA DO BAILEYS ======
+// ====== 2. IMPORTAÇÃO BLINDADA DO BAILEYS ======
+// Aqui está a correção: Extraímos manualmente cada função de onde ela estiver
 const baileysModule = require("@whiskeysockets/baileys");
-const baileys = baileysModule.default || baileysModule;
 
-const {
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-  Browsers,
-  isJidGroup,
-  isJidBroadcast,
-  isJidStatusBroadcast,
-  isJidNewsletter,
-  extractMessageContent,
-  jidNormalizedUser,
-  getContentType
-} = baileys;
+// Função auxiliar para achar o export correto (na raiz ou no .default)
+const getExport = (key) => {
+  if (baileysModule[key]) return baileysModule[key];
+  if (baileysModule.default && baileysModule.default[key]) return baileysModule.default[key];
+  return undefined;
+};
 
-// ====== 3. MEMÓRIA BLINDADA (FALLBACK) ======
-// Tenta pegar a função original. Se não existir, cria uma versão simples.
-let makeStoreFunc = baileys.makeInMemoryStore || baileysModule.makeInMemoryStore;
+// Extração manual e segura
+const useMultiFileAuthState = getExport("useMultiFileAuthState");
+const fetchLatestBaileysVersion = getExport("fetchLatestBaileysVersion");
+const makeInMemoryStore = getExport("makeInMemoryStore");
+const DisconnectReason = getExport("DisconnectReason");
+const Browsers = getExport("Browsers");
+const isJidGroup = getExport("isJidGroup");
+const isJidBroadcast = getExport("isJidBroadcast");
+const isJidStatusBroadcast = getExport("isJidStatusBroadcast");
+const isJidNewsletter = getExport("isJidNewsletter");
+const extractMessageContent = getExport("extractMessageContent");
+const jidNormalizedUser = getExport("jidNormalizedUser");
+const getContentType = getExport("getContentType");
 
-if (typeof makeStoreFunc !== 'function') {
-  logger.warn("⚠️ makeInMemoryStore não encontrado na lib. Usando versão interna simplificada.");
-  
-  // Versão caseira para garantir que o bot suba e traduza LIDs
-  makeStoreFunc = ({ logger }) => {
-    return {
-      contacts: {},
-      bind: (ev) => {
-        ev.on('contacts.upsert', (updates) => {
-          for (const c of updates) {
-            if (c.id) {
-              // Guarda o contato na memória
-              // Se for LID, isso nos ajuda a achar o número real depois
-              store.contacts[c.id] = Object.assign(store.contacts[c.id] || {}, c);
-            }
-          }
-        });
-        ev.on('contacts.update', (updates) => {
-          for (const c of updates) {
-            if (c.id && store.contacts[c.id]) {
-              Object.assign(store.contacts[c.id], c);
-            }
-          }
-        });
-      },
-      readFromFile: () => {}, // Funções vazias para não dar erro
-      writeToFile: () => {}
+// A função principal (makeWASocket) às vezes é o próprio export default
+const makeWASocket = baileysModule.default || baileysModule.makeWASocket || baileysModule;
+
+// Validação de Segurança: Se faltar algo crítico, avisamos agora
+if (typeof useMultiFileAuthState !== "function") {
+  throw new Error("CRÍTICO: 'useMultiFileAuthState' não encontrado no Baileys.");
+}
+if (typeof makeWASocket !== "function") {
+  throw new Error("CRÍTICO: 'makeWASocket' não encontrado no Baileys.");
+}
+
+// ====== 3. STORE (MEMÓRIA) ======
+// Fallback caso o makeInMemoryStore ainda falhe (ex: versão muito antiga)
+let store;
+if (typeof makeInMemoryStore === 'function') {
+    store = makeInMemoryStore({ logger });
+} else {
+    logger.warn("⚠️ makeInMemoryStore real não encontrado. Usando memória simples.");
+    store = {
+        contacts: {},
+        bind: (ev) => {
+            ev.on('contacts.upsert', (u) => { for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); });
+            ev.on('contacts.update', (u) => { for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); });
+        },
+        readFromFile: () => {},
+        writeToFile: () => {}
     };
-  };
 }
 
-// Agora criamos a store com segurança
-const store = makeStoreFunc({ logger });
-if (store.readFromFile) {
-    try { store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
+// Tenta carregar do arquivo
+try {
+  if (store.readFromFile) store.readFromFile(path.join(DATA_DIR, 'baileys_store.json'));
+} catch (err) {
+  logger.info("Store nova iniciada.");
 }
-// Salva periodicamente (se suportado)
+
+// Salva periodicamente
 setInterval(() => {
-    if (store.writeToFile) {
-        try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
-    }
+  try {
+    if (store.writeToFile) store.writeToFile(path.join(DATA_DIR, 'baileys_store.json'));
+  } catch {}
 }, 10_000);
 
-
-// ====== 4. FLUXO DO BOT ======
+// ====== 4. FLUXO ======
 const flow = createConversaFlow({
   dataDir: DATA_DIR,
   dbUrl: process.env.DATABASE_URL,
   logger
 });
 
-// ====== 5. ESTADO E LOCK ======
+// ====== 5. ESTADO ======
 let sock = null;
 let waReady = false;
 let waLastOpen = 0;
@@ -113,14 +114,10 @@ let lastPongAt = 0;
 let lastActivityAt = 0; 
 globalThis.__lastQR = "";
 
-// Janelas de saúde
-const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "10");
-const PING_EVERY_MS = 300_000; 
-const PONG_GRACE_MS = 600_000; 
-
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
 
+// Lock System
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
 try { fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true }); } catch {}
@@ -136,7 +133,7 @@ function writeLockSafe() {
 writeLockSafe();
 setInterval(writeLockSafe, 30_000);
 
-// ====== 6. PROXY ======
+// Proxy
 let __proxyAgent;
 async function buildProxyAgent(url) {
   if (!url) return undefined;
@@ -151,7 +148,7 @@ function maskProxy(u){
   catch{ return "****"; }
 }
 
-// ====== 7. UTILS ======
+// Utils
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 function toJid(to){
   if (!to) throw new Error("destinatário vazio");
@@ -173,7 +170,11 @@ function cleanupSock() {
   sock = null;
 }
 
-// ====== 8. WATCHDOG ======
+// ====== 6. WATCHDOG ======
+const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "10");
+const PING_EVERY_MS = 300_000; 
+const PONG_GRACE_MS = 600_000; 
+
 function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
@@ -221,7 +222,7 @@ async function safeStartWA(force = false) {
   }
 }
 
-// ====== 9. START WA ======
+// ====== 7. START WA ======
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
   registerSaveCreds(saveCreds);
@@ -230,25 +231,30 @@ async function startWA() {
   logger.info({ version }, "Baileys version");
   const agent = await buildProxyAgent(PROXY_URL);
 
-  sock = baileys.makeWASocket({
+  sock = makeWASocket({
     version,
     auth: state,
     logger,
-    browser: Browsers.macOS("Chrome"),
+    browser: Browsers ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "10.0"],
     agent,             
     fetchAgent: agent, 
     markOnlineOnConnect: false,
-    syncFullHistory: true, // ESSENCIAL PARA LIGAR O LID AO TELEFONE
+    syncFullHistory: true, // Sincroniza contatos para tradução de LID
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
     shouldIgnoreJid: jid => {
       const j = String(jid);
-      return _isGroup(j) || _isBroadcast(j) || _isStatus(j) || _isNewsletter(j);
+      // Helpers de JID podem estar indefinidos se a importação falhou parcialmente, então checamos '?'
+      const isG = isJidGroup ? isJidGroup(j) : j.endsWith("@g.us");
+      const isB = isJidBroadcast ? isJidBroadcast(j) : j.endsWith("@broadcast");
+      const isN = isJidNewsletter ? isJidNewsletter(j) : j.endsWith("@newsletter");
+      const isS = isJidStatusBroadcast ? isJidStatusBroadcast(j) : j === "status@broadcast";
+      return isG || isB || isS || isN;
     }
   });
 
-  // LIGA A MEMÓRIA AQUI
+  // Liga a memória
   store.bind(sock.ev);
 
   lastPongAt = Date.now();
@@ -313,7 +319,7 @@ async function startWA() {
     }
   });
 
-  // ===== 10. HANDLER DE MENSAGENS =====
+  // ===== 8. HANDLER DE MENSAGENS =====
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       if (type !== "notify") {
@@ -339,33 +345,35 @@ async function startWA() {
         
         let jid = m.key?.remoteJid || "";
 
-        // --- FIX DO WHATSAPP WEB (LID) ---
-        // Se recebermos um ID estranho (@lid), perguntamos pra memória quem é esse cara
+        // --- TRADUÇÃO DE LID (WEB) ---
         if (jid.includes("@lid")) {
-            const contact = store.contacts[jidNormalizedUser(jid)];
+            // Normaliza para busca na store
+            const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid.split(":")[0];
+            
+            const contact = store.contacts[lidKey];
             if (contact && contact.id && !contact.id.includes("@lid")) {
-                // Achamos! É o número real que está salvo na memória
-                jid = contact.id; 
+                jid = contact.id; // Substitui pelo número real
             } 
         }
 
-        jid = jidNormalizedUser(jid);
+        if (jidNormalizedUser) jid = jidNormalizedUser(jid);
+        
         if (!jid || jid.endsWith("@status")) continue;
 
-        const ct = getContentType(m.message);
+        const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
         logger.info({ type, fromMe, jid, ct, msgId }, "RX upsert");
 
         if (fromMe) continue;
 
-        const content = extractMessageContent(m.message) || {};
+        const content = extractMessageContent ? extractMessageContent(m.message) : m.message;
         const text =
-          content.conversation ||
-          content.extendedTextMessage?.text ||
-          content.imageMessage?.caption ||
-          content.videoMessage?.caption ||
-          content.buttonsResponseMessage?.selectedButtonId ||
-          content.listResponseMessage?.singleSelectReply?.selectedRowId ||
-          content.templateButtonReplyMessage?.selectedId ||
+          content?.conversation ||
+          content?.extendedTextMessage?.text ||
+          content?.imageMessage?.caption ||
+          content?.videoMessage?.caption ||
+          content?.buttonsResponseMessage?.selectedButtonId ||
+          content?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+          content?.templateButtonReplyMessage?.selectedId ||
           "";
 
         if (!text) continue;
@@ -397,7 +405,7 @@ async function startWA() {
   });
 }
 
-// ====== 11. ROTAS HTTP ======
+// ====== 9. ROTAS HTTP ======
 app.get("/", (_req, res) => res.send("ok"));
 app.get("/health", (_req, res) => {
   const now = Date.now();
@@ -442,7 +450,7 @@ app.get("/test/wa", async (req, res) => {
   }
 });
 
-// ====== 12. BOOT ======
+// ====== 10. BOOT ======
 (async () => {
   armWaWatchdog();
   await safeStartWA(true);
