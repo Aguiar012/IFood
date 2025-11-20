@@ -51,45 +51,23 @@ if (!useMultiFileAuthState || !makeWASocket) {
   throw new Error("CRÍTICO: Funções do Baileys não encontradas.");
 }
 
-// ====== 3. MEMÓRIA PERSISTENTE ======
+// ====== 3. MEMÓRIA (Tentativa de Tradução) ======
 let store;
-const STORE_PATH = path.join(DATA_DIR, 'baileys_store.json');
-
-// Função auxiliar para criar store manual se precisar
-const createManualStore = () => ({
-    contacts: {},
-    bind: (ev) => {
-        ev.on('contacts.upsert', (u) => { 
-            for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c);
-        });
-        ev.on('contacts.update', (u) => { 
-            for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); 
-        });
-    },
-    readFromFile: (p) => {
-        try { 
-            if(fs.existsSync(p)) store.contacts = JSON.parse(fs.readFileSync(p)).contacts; 
-        } catch(e) { logger.error("Erro leitura store manual"); }
-    },
-    writeToFile: (p) => {
-        try { fs.writeFileSync(p, JSON.stringify({contacts: store.contacts})); } catch {}
-    }
-});
-
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
+    try { store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
+    setInterval(() => {
+        try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
+    }, 10_000);
 } else {
-    logger.warn("⚠️ Usando memória manual.");
-    store = createManualStore();
+    store = {
+        contacts: {},
+        bind: (ev) => {
+            ev.on('contacts.upsert', (u) => { for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); });
+            ev.on('contacts.update', (u) => { for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); });
+        }
+    };
 }
-
-// Carrega dados antigos
-try { store.readFromFile(STORE_PATH); } catch {}
-
-// Salva periodicamente
-setInterval(() => {
-    try { store.writeToFile(STORE_PATH); } catch {}
-}, 10_000);
 
 // ====== 4. FLUXO ======
 const flow = createConversaFlow({ dataDir: DATA_DIR, dbUrl: process.env.DATABASE_URL, logger });
@@ -146,6 +124,7 @@ function cleanupSock() {
 // ====== 6. WATCHDOG ======
 const PING_EVERY_MS = 300_000; 
 const PONG_GRACE_MS = 600_000; 
+
 function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
@@ -153,7 +132,9 @@ function armWaWatchdog() {
     const stale = false; 
     const noPong = now - lastPongAt > PONG_GRACE_MS; 
     const wsDead = !(sock?.ws) || (sock?.ws?.readyState !== 1);
+
     try { if (sock?.ws?.readyState === 1) { sock.ws.ping?.(); } } catch {}
+
     if (noPong || stale || wsDead || !waReady) {
       logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: restart");
       await safeStartWA(true);
@@ -248,52 +229,23 @@ async function startWA() {
             const fromMe = !!m.key?.fromMe;
             let jid = m.key?.remoteJid || "";
 
-            // 1. Lógica de Tradução
+            // 1. Tenta traduzir (Melhor Esforço)
             if (jid.includes("@lid")) {
-                let resolved = false;
                 const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-
-                // A) É o próprio dono?
-                if (fromMe && sock.user?.id) {
-                    jid = jidNormalizedUser(sock.user.id);
-                    resolved = true;
+                
+                // Tenta memória direta
+                if (store && store.contacts && store.contacts[lidKey]) {
+                    const c = store.contacts[lidKey];
+                    if (c.id && !c.id.includes("@lid")) jid = c.id;
                 }
-
-                // B) Busca na memória
-                if (!resolved && store && store.contacts) {
-                     let contact = store.contacts[lidKey];
-                     if (contact && contact.id && !contact.id.includes("@lid")) {
-                         jid = contact.id;
-                         resolved = true;
-                     }
-                     // C) Busca Reversa (Lento mas necessário)
-                     if (!resolved) {
-                        const all = Object.values(store.contacts);
-                        const found = all.find(c => c.lid === lidKey);
-                        if (found && found.id && !found.id.includes("@lid")) {
-                             jid = found.id;
-                             resolved = true;
-                        }
-                     }
-                }
-
-                // D) Se FALHOU tudo:
-                if (!resolved) {
-                    logger.warn({ jid }, "⚠️ LID sem vínculo conhecido. Bloqueando para proteger DB.");
-                    if (!fromMe) {
-                        await sock.sendMessage(jid, { text: "⚠️ *Sincronização Pendente*\n\nAinda não consegui identificar seu número de telefone.\n\nPor favor, envie um *'Oi'* usando o app do **Celular**.\nAssim que fizer isso, o sistema vai aprender quem é você e liberará o acesso pelo computador para sempre." });
-                    }
-                    // AQUI É A PROTEÇÃO: Se não sabemos o número, NÃO salvamos no banco.
-                    continue; 
-                }
+                // Se falhar, paciência. Segue o baile com o ID que tem.
             }
 
             if (jidNormalizedUser) jid = jidNormalizedUser(jid);
             if (!jid || jid.endsWith("@status")) continue;
 
-            // Se chegou aqui, jid é SEGURO (número de telefone)
             const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-            logger.info({ jid, ct }, "Msg processada com sucesso");
+            logger.info({ jid, ct }, "Mensagem recebida (Liberada)");
 
             if (fromMe) continue;
 
