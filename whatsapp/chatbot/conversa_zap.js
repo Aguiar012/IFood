@@ -229,20 +229,45 @@ async function startWA() {
 
             const fromMe = !!m.key?.fromMe;
             let jid = m.key?.remoteJid || "";
-
-            // 1. Tenta traduzir LID -> Número Real (Melhor Esforço)
-            if (jid.includes("@lid")) {
-                const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-                
-                // Tenta memória direta
-                if (store && store.contacts && store.contacts[lidKey]) {
-                    const c = store.contacts[lidKey];
-                    if (c.id && !c.id.includes("@lid")) jid = c.id;
+  
+            // 1. Se for LID, tenta resolver para o JID com número usando a store
+            if (jid.includes("@lid") && store && store.contacts) {
+              const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
+            
+              let contact = null;
+            
+              const contactsObj = store.contacts;
+            
+              // Caso a store use Map (versões mais novas do Baileys)
+              if (contactsObj && typeof contactsObj.get === "function") {
+                for (const c of contactsObj.values()) {
+                  if (!c) continue;
+                  const cLid = c.lid || c.lidJid || c.lidUser;
+                  if (cLid && jidNormalizedUser(cLid) === lidKey) {
+                    contact = c;
+                    break;
+                  }
                 }
+              } else {
+                // Caso seja um objeto plano { jid: contact }
+                const all = Object.values(contactsObj || {});
+                contact = all.find(c => {
+                  if (!c) return false;
+                  const cLid = c.lid || c.lidJid || c.lidUser;
+                  return cLid && jidNormalizedUser(cLid) === lidKey;
+                });
+              }
+            
+              if (contact && contact.id && !contact.id.includes("@lid")) {
+                // Aqui finalmente viramos 43852...@lid em 5511...@s.whatsapp.net
+                jid = contact.id;
+              }
             }
-
+            
+            // Normalização final (remove device, etc)
             if (jidNormalizedUser) jid = jidNormalizedUser(jid);
             if (!jid || jid.endsWith("@status")) continue;
+
 
             const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
             logger.info({ jid, ct }, "Mensagem processada");
