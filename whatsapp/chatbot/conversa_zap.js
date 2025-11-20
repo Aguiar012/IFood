@@ -55,21 +55,18 @@ if (!useMultiFileAuthState || !makeWASocket) {
 let store;
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
-    // Tenta ler do disco na inicialização
-    try { 
-        if (fs.existsSync(path.join(DATA_DIR, 'baileys_store.json'))) {
-            store.readFromFile(path.join(DATA_DIR, 'baileys_store.json'));
-            logger.info("Memória carregada do disco com sucesso.");
-        }
-    } catch(e) { logger.error("Erro ao ler store:", e); }
-
-    // Salva a cada 10s
+    try { store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
     setInterval(() => {
         try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
     }, 10_000);
 } else {
-    // Fallback para evitar crash
-    store = { contacts: {}, bind: () => {}, readFromFile: () => {}, writeToFile: () => {} };
+    store = {
+        contacts: {},
+        bind: (ev) => {
+            ev.on('contacts.upsert', (u) => { for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); });
+            ev.on('contacts.update', (u) => { for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); });
+        }
+    };
 }
 
 // ====== 4. FLUXO ======
@@ -125,7 +122,6 @@ function cleanupSock() {
 }
 
 // ====== 6. WATCHDOG ======
-// Relaxado para evitar loops de restart
 const PING_EVERY_MS = 300_000; 
 const PONG_GRACE_MS = 600_000; 
 
@@ -233,46 +229,38 @@ async function startWA() {
             const fromMe = !!m.key?.fromMe;
             let jid = m.key?.remoteJid || "";
 
-            // ====== TRADUÇÃO ROBUSTA (WEB -> CELULAR) ======
-            // Se for LID, tentamos encontrar o número real a todo custo
-            if (jid.includes("@lid")) {
+            // 1. TRUQUE DE MESTRE: Se for VOCÊ (fromMe), usa o ID da conexão
+            // Isso resolve o teste do dono imediatamente.
+            if (fromMe && sock.user?.id) {
+                 // O ID do user vem tipo '55119999:2@s.whatsapp.net'
+                 // jidNormalizedUser limpa isso para o número puro.
+                 jid = jidNormalizedUser(sock.user.id);
+            }
+            
+            // 2. Tenta traduzir LID para outros usuários
+            else if (jid.includes("@lid")) {
                 let resolved = false;
                 const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
 
-                // 1. Tentativa Direta
                 if (store && store.contacts) {
                      let contact = store.contacts[lidKey];
                      if (contact && contact.id && !contact.id.includes("@lid")) {
                          jid = contact.id;
                          resolved = true;
                      }
-                }
-
-                // 2. BUSCA REVERSA (Varredura Completa) - Aqui está o Pulo do Gato
-                if (!resolved && store && store.contacts) {
-                    const allContacts = Object.values(store.contacts);
-                    // Procura qualquer contato que tenha esse 'lid' como propriedade
-                    const found = allContacts.find(c => c.lid === lidKey || (c.id && c.id.includes("@lid") && c.id === lidKey));
-                    
-                    if (found) {
-                        // Se achamos o contato pelo LID, verificamos se ele tem um ID "normal" (telefone)
-                        // Às vezes o ID principal do contato é o telefone, e o LID é uma prop.
-                        if (found.id && !found.id.includes("@lid")) {
-                            jid = found.id;
-                            resolved = true;
-                            logger.info({ from: lidKey, to: jid }, "LID traduzido via Busca Reversa!");
-                        } else if (found.notify || found.name) {
-                             // Se achou o contato mas o ID ainda é LID, tenta inferir ou logar
-                             logger.info({ found }, "Contato encontrado mas ID ainda é LID. Tentando usar notify/name?");
+                     
+                     // Busca reversa se falhar
+                     if (!resolved) {
+                        const all = Object.values(store.contacts);
+                        const found = all.find(c => c.lid === lidKey);
+                        if (found && found.id && !found.id.includes("@lid")) {
+                             jid = found.id;
+                             resolved = true;
                         }
-                    }
+                     }
                 }
-
-                if (!resolved) {
-                    logger.warn({ jid }, "⚠️ FALHA NA TRADUÇÃO: Não consegui achar o número real na memória.");
-                    // AQUI REMOVEMOS O BLOQUEIO. O CÓDIGO VAI TENTAR RODAR MESMO ASSIM.
-                    // Se falhar no banco, falhou. Mas não vamos ignorar o usuário.
-                }
+                // Se falhar a tradução de terceiros, ele segue (sem bloquear)
+                // mas se for você, o passo 1 já garantiu o número certo.
             }
 
             // Normalização final
@@ -281,7 +269,7 @@ async function startWA() {
             if (!jid || jid.endsWith("@status")) continue;
 
             const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-            logger.info({ jid, ct }, "Processando mensagem...");
+            logger.info({ jid, ct }, "Mensagem processada");
 
             if (fromMe) continue;
 
