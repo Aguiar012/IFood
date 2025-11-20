@@ -303,39 +303,39 @@ async function startWA() {
           continue;
         }
 
-        // trava contra duplicados (replay após reconnect etc.)
+        // trava contra duplicados
         if (handledMessageIds.has(msgId)) {
-          logger.info({ msgId }, "Mensagem duplicada ignorada");
           continue;
         }
         handledMessageIds.add(msgId);
 
         const fromMe = !!m.key?.fromMe;
-        // ... código anterior ...
+        
+        // 1. PRIMEIRO: Define o JID (Cria a variável)
+        let jid = m.key?.remoteJid || "";
+        
+        // 2. SEGUNDO: Verifica se é válido
+        if (!jid || jid.endsWith("@status")) continue;
 
-        // BLOQUEIO DE LID (Para garantir que pegamos o número real)
+        // 3. TERCEIRO: Verifica e bloqueia o LID (WhatsApp Web ID)
         if (jid.includes("@lid")) {
-            // Se for mensagem do usuário (não do bot), avisa ele
             if (!fromMe) {
-              console.log("Ignorando mensagem de @lid:", jid);
-              await sock.sendMessage(jid, { text: "⚠️ *Aviso do Sistema*\n\nPor favor, envie a primeira mensagem usando o seu **Celular** (App do Android/iOS).\n\nO WhatsApp Web envia um código temporário que impede seu cadastro correto." });
+                logger.warn({ jid }, "Ignorando JID do tipo LID (Web) para evitar cadastro duplicado.");
+                // Opcional: avisar o usuário para usar o celular
+                // await sock.sendMessage(jid, { text: "Por favor, mande um 'Oi' pelo celular para validar seu cadastro." });
             }
             continue; 
         }
-        
-        // ... continua o código ...
-        
-        if (jid.endsWith("@lid")) {
-            logger.warn({ jid }, "JID recebido é LID. Ignorando mensagem para evitar cadastro errado.");
-            continue; 
-        }
-        // ------------------------------------------
+
+        // 4. QUARTO: Normaliza para garantir formato padrão (se passar pelo filtro acima)
+        jid = jidNormalizedUser(jid);
 
         const ct = getContentType(m.message);
         logger.info({ type, fromMe, jid, ct, msgId }, "RX upsert");
 
         if (fromMe) continue;
 
+        // ... (O restante do código continua igual: extrair texto, readMessages, flow.handleText, etc.)
         const content = extractMessageContent(m.message) || {};
         const text =
           content.conversation ||
@@ -351,6 +351,7 @@ async function startWA() {
 
         // marca lido + presença
         try { await sock.readMessages([m.key]); } catch {}
+        // ... resto do código ...
         try {
           await sock.presenceSubscribe(jid);
           await sock.sendPresenceUpdate("composing", jid);
