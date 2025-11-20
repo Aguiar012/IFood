@@ -19,6 +19,7 @@ const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 
+// Garante pastas
 try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
@@ -54,32 +55,56 @@ if (typeof useMultiFileAuthState !== "function" || typeof makeWASocket !== "func
   throw new Error("CRÍTICO: Funções essenciais do Baileys não encontradas.");
 }
 
-// ====== HELPER FUNCTIONS (CORREÇÃO AQUI) ======
-// Adicionei estas funções de volta para evitar o ReferenceError
-const _isGroup = j => (isJidGroup ? isJidGroup(j) : String(j).endsWith("@g.us"));
-const _isBroadcast = j => (isJidBroadcast ? isJidBroadcast(j) : String(j).endsWith("@broadcast"));
-const _isStatus = j => (isJidStatusBroadcast ? isJidStatusBroadcast(j) : String(j) === "status@broadcast");
-const _isNewsletter = j => (isJidNewsletter ? isJidNewsletter(j) : String(j).endsWith("@newsletter"));
-
-// ====== 3. MEMÓRIA (STORE) ======
+// ====== 3. MEMÓRIA PERSISTENTE (STORE) ======
+// Essa lógica garante que, mesmo se der erro na lib, nós salvamos no disco.
 let store;
+
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
-    try { store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
-    setInterval(() => {
-        try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
-    }, 10_000);
 } else {
-    logger.warn("⚠️ Usando memória simples (fallback).");
+    logger.warn("⚠️ Usando memória manual com persistência em disco.");
     store = {
         contacts: {},
         bind: (ev) => {
-            ev.on('contacts.upsert', (u) => { for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); });
-            ev.on('contacts.update', (u) => { for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); });
+            ev.on('contacts.upsert', (u) => { 
+                for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); 
+            });
+            ev.on('contacts.update', (u) => { 
+                for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); 
+            });
         },
-        readFromFile: () => {}, writeToFile: () => {}
+        // Implementação manual de salvar/ler arquivo
+        readFromFile: (fpath) => {
+            try {
+                if (fs.existsSync(fpath)) {
+                    const data = JSON.parse(fs.readFileSync(fpath, 'utf-8'));
+                    if (data.contacts) store.contacts = data.contacts;
+                    logger.info(`Memória carregada de ${fpath}`);
+                }
+            } catch(e) { logger.error({ err: String(e) }, "Erro ao ler store manual"); }
+        },
+        writeToFile: (fpath) => {
+            try {
+                fs.writeFileSync(fpath, JSON.stringify({ contacts: store.contacts }));
+            } catch(e) { logger.error({ err: String(e) }, "Erro ao salvar store manual"); }
+        }
     };
 }
+
+// Tenta carregar dados antigos (para lembrar quem é você após restart)
+try { 
+    store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); 
+} catch (e) {
+    logger.info("Iniciando memória do zero.");
+}
+
+// Salva a cada 10 segundos para garantir persistência
+setInterval(() => {
+    try { 
+        store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); 
+    } catch {}
+}, 10_000);
+
 
 // ====== 4. FLUXO ======
 const flow = createConversaFlow({
@@ -103,7 +128,7 @@ globalThis.__lastQR = "";
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
 
-// Lock
+// Lock System
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
 try { fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true }); } catch {}
@@ -144,7 +169,7 @@ function cleanupSock() {
   sock = null;
 }
 
-// ====== 6. WATCHDOG ======
+// ====== 6. WATCHDOG (Monitoramento) ======
 const PING_EVERY_MS = 300_000; 
 const PONG_GRACE_MS = 600_000; 
 
@@ -159,7 +184,7 @@ function armWaWatchdog() {
     try { if (sock?.ws?.readyState === 1) { sock.ws.ping?.(); } } catch {}
 
     if (noPong || stale || wsDead || !waReady) {
-      logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: restart");
+      logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: reiniciando conexão...");
       await safeStartWA(true);
     }
   }, PING_EVERY_MS);
@@ -195,22 +220,31 @@ async function startWA() {
     version,
     auth: state,
     logger,
+    // Forçar navegador Desktop para evitar instabilidades
     browser: Browsers ? Browsers.macOS("Chrome") : ["Mac OS", "Chrome", "10.0"],
     agent,             
     fetchAgent: agent, 
     markOnlineOnConnect: false,
-    syncFullHistory: true,
-    connectTimeoutMs: 60_000,
-    keepAliveIntervalMs: 15_000,
+    // Ativa sync completo para mapear WEB <-> Celular
+    syncFullHistory: true, 
+    // Aumenta timeouts para evitar quedas em conexões lentas (Erro Timed Out)
+    connectTimeoutMs: 90_000,
+    defaultQueryTimeoutMs: 90_000,
+    keepAliveIntervalMs: 30_000,
+    retryRequestDelayMs: 5000,
     printQRInTerminal: false,
     shouldIgnoreJid: jid => {
       const j = String(jid);
-      // Agora as funções _isGroup existem!
-      return _isGroup(j) || _isBroadcast(j) || _isStatus(j) || _isNewsletter(j);
+      const isG = isJidGroup ? isJidGroup(j) : j.endsWith("@g.us");
+      const isB = isJidBroadcast ? isJidBroadcast(j) : j.endsWith("@broadcast");
+      const isN = isJidNewsletter ? isJidNewsletter(j) : j.endsWith("@newsletter");
+      const isS = isJidStatusBroadcast ? isJidStatusBroadcast(j) : j === "status@broadcast";
+      return isG || isB || isS || isN;
     }
   });
 
-  if (store) store.bind(sock.ev);
+  // Liga a memória (para traduzir Web -> Celular)
+  store.bind(sock.ev);
   
   lastPongAt = Date.now();
   lastActivityAt = Date.now();
@@ -222,21 +256,30 @@ async function startWA() {
     if (qr) {
       globalThis.__lastQR = qr;
       qrcode.generate(qr, { small: true });
+      logger.info("QR Code gerado. Escaneie para vincular.");
     }
     if (connection === "open") {
       waReady = true;
       waLastOpen = Date.now();
-      logger.info("WA conectado.");
+      // Reseta contador de erro ao conectar com sucesso
+      err428Count = 0; 
+      logger.info("WhatsApp CONECTADO e pronto!");
     }
     if (connection === "close") {
       const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
       waReady = false;
-      if (status === DisconnectReason?.loggedOut) {
+      
+      // 428 = Precondition Required (Sessão inválida/corrompida)
+      // 401 = Logged Out
+      if (status === DisconnectReason?.loggedOut || status === 428) {
+        logger.warn({ status }, "Sessão inválida ou Logout. Limpando auth para novo QR.");
         try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
         fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
-        setTimeout(() => safeStartWA(true), 1500);
-      } else {
         setTimeout(() => safeStartWA(true), 2000);
+      } else {
+        // Erros temporários (Timeouts, Internet) -> Reconecta rápido
+        logger.warn({ status }, "Desconectado temporariamente. Reconectando...");
+        setTimeout(() => safeStartWA(true), 3000);
       }
     }
   });
@@ -254,26 +297,28 @@ async function startWA() {
         const fromMe = !!m.key?.fromMe;
         let jid = m.key?.remoteJid || "";
 
-        // ====== TRAVA DE SEGURANÇA DO WEB (LID) ======
+        // ====== TRADUÇÃO AUTOMÁTICA (WEB -> CELULAR) ======
         if (jid.includes("@lid")) {
             let resolved = false;
             
             if (store && store.contacts) {
+                 // Tenta achar pelo LID direto ou normalizado
                  const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-                 const contact = store.contacts[lidKey];
+                 const contact = store.contacts[lidKey] || store.contacts[jid];
                  
                  if (contact && contact.id && !contact.id.includes("@lid")) {
                      jid = contact.id; 
                      resolved = true;
+                     logger.info({ lid: lidKey, real: jid }, "ID Web traduzido para Celular com sucesso.");
                  }
             }
 
             if (!resolved) {
                 if (!fromMe) {
-                    logger.warn({ jid }, "LID não identificado. Solicitando sync via celular.");
-                    await sock.sendMessage(jid, { text: "🔄 *Atenção*\n\nIdentifiquei que você está usando o WhatsApp Web, mas o sistema ainda não sincronizou seu número.\n\nPor favor, envie um *'Oi'* usando seu **CELULAR** agora.\n\nIsso é necessário apenas uma vez para corrigir o cadastro." });
+                    logger.warn({ jid }, "LID não identificado na memória. Solicitando sync.");
+                    await sock.sendMessage(jid, { text: "🔄 *Sincronização Necessária*\n\nO sistema identificou seu acesso via WhatsApp Web, mas ainda não baixou seus dados de contato.\n\nPor favor, envie um *'Oi'* pelo seu **CELULAR** agora.\n\nIsso vai corrigir seu cadastro permanentemente." });
                 }
-                continue; 
+                continue; // Impede salvar erro no banco
             }
         }
 
@@ -282,7 +327,7 @@ async function startWA() {
         if (!jid || jid.endsWith("@status")) continue;
 
         const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-        logger.info({ jid, ct }, "Mensagem processada (ID Real)");
+        logger.info({ jid, ct }, "Mensagem processada");
 
         if (fromMe) continue;
 
