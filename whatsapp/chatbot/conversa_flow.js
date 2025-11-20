@@ -210,7 +210,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         </div>
 
         <p><strong>Data a cancelar:</strong> ${diaSemana}, ${dataStr}</p>
-        <p><strong>Telefone (WhatsApp):</strong> <a href="https://wa.me/${tel}">${tel}</a></p>
         
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
         <p style="font-size: 12px; color: #777;">
