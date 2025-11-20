@@ -26,13 +26,6 @@ const {
   getContentType
 } = baileys;
 
-// ====== STORE (Memória de Contatos) ======
-const store = makeInMemoryStore({ logger });
-store.readFromFile(path.join(DATA_DIR, 'baileys_store.json'));
- setInterval(() => {
-   store.writeToFile(path.join(DATA_DIR, 'baileys_store.json'));
-}, 10_000);
-
 const _isGroup = j => (isJidGroup?.(j)) || String(j).endsWith("@g.us");
 const _isBroadcast = j => (isJidBroadcast?.(j)) || String(j).endsWith("@broadcast");
 const _isStatus = j => (isJidStatusBroadcast?.(j)) || String(j) === "status@broadcast";
@@ -41,23 +34,37 @@ const _isNewsletter = j => (isJidNewsletter?.(j)) || String(j).endsWith("@newsle
 import paths from "../paths.js";
 import { createConversaFlow } from "./conversa_flow.js";
 
-// ====== ENV ======
+// ====== ENV (DEFINIÇÃO DAS VARIÁVEIS) ======
 const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
 
-
 // janelas de saúde
 const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "10");
-const PING_EVERY_MS = 300_000; // Verificação a cada 5 minutos (300.000ms)
-const PONG_GRACE_MS = 600_000; // Tolerância de 10 minutos sem resposta
+const PING_EVERY_MS = 300_000; 
+const PONG_GRACE_MS = 600_000; 
 
 // ====== LOG/HTTP ======
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 app.use(express.json());
+
+// ====== STORE (AGORA SIM: DEPOIS DE DATA_DIR SER CRIADO) ======
+const store = makeInMemoryStore({ logger });
+try {
+  // Tenta ler o arquivo se existir
+  store.readFromFile(path.join(DATA_DIR, 'baileys_store.json'));
+} catch (err) {
+  logger.info("Nenhum arquivo de store encontrado, criando novo.");
+}
+setInterval(() => {
+  // Salva a cada 10s
+  try {
+    store.writeToFile(path.join(DATA_DIR, 'baileys_store.json'));
+  } catch {}
+}, 10_000);
 
 // ====== FLOW ======
 const flow = createConversaFlow({
@@ -75,17 +82,13 @@ let startingWA = false;
 let startingSince = 0;
 let err428Count = 0;
 let lastPongAt = 0;
-let lastActivityAt = 0; // RX/TX recente
+let lastActivityAt = 0; 
 globalThis.__lastQR = "";
 
-// evita responder a mesma mensagem 2x
 const handledMessageIds = new Set();
-// limpa o cache periodicamente pra não crescer sem fim
 setInterval(() => handledMessageIds.clear(), 60_000);
 
-
-
-// ====== LOCK simples (mas sem derrubar o processo em k8s) ======
+// ====== LOCK simples ======
 const HOST = process.env.HOSTNAME || "local";
 const LOCK_FILE = path.join(DATA_DIR, "state", "lock-conversazap.json");
 fs.mkdirSync(path.dirname(LOCK_FILE), { recursive: true });
@@ -96,17 +99,10 @@ function writeLockSafe() {
       LOCK_FILE,
       JSON.stringify({ ts: Date.now(), pid: process.pid, host: HOST })
     );
-  } catch {
-    // se der erro de fs, só ignora; nunca derruba o bot por isso
-  }
+  } catch {}
 }
 
-// em ambiente com um único serviço de WA, não faz sentido abortar se já tiver lock.
-// apenas sobrescreve o lock sempre.
-(function initLock() {
-  writeLockSafe();
-})();
-
+(function initLock() { writeLockSafe(); })();
 setInterval(writeLockSafe, 30_000);
 
 // ====== Proxy ======
@@ -138,7 +134,6 @@ async function sendWA(to, text){
   return sent?.key?.id;
 }
 
-// ====== limpeza forte ======
 function cleanupSock() {
   try { sock?.ws?.removeAllListeners?.(); } catch {}
   try { sock?.ev?.removeAllListeners?.(); } catch {}
@@ -152,11 +147,10 @@ function armWaWatchdog() {
   if (wdTimer) return;
   wdTimer = setInterval(async () => {
     const now = Date.now();
-    const stale = false; // <--- Desativamos essa regra suicida
-    const noPong = now - lastPongAt > PONG_GRACE_MS; // sem pong tempo demais
+    const stale = false; 
+    const noPong = now - lastPongAt > PONG_GRACE_MS; 
     const wsDead = !(sock?.ws) || (sock?.ws?.readyState !== 1);
 
-    // ping periódico
     try { if (sock?.ws?.readyState === 1) { sock.ws.ping?.(); } } catch {}
 
     if (noPong || stale || wsDead || !waReady) {
@@ -166,7 +160,6 @@ function armWaWatchdog() {
   }, PING_EVERY_MS);
 }
 
-// ====== salvar creds uma vez ======
 let _saveCredsRef = async () => {};
 let _sigHooked = false;
 function registerSaveCreds(fn){
@@ -178,12 +171,10 @@ function registerSaveCreds(fn){
   }
 }
 
-// ====== Start com “fuso de segurança” ======
 async function safeStartWA(force = false) {
   if (startingWA && !force) return;
   const DEADLINE_MS = 90_000;
   if (startingWA && force && (Date.now() - startingSince > DEADLINE_MS)) {
-    // stuck: destrava
     logger.warn("Start preso — forçando destravar startingWA");
     startingWA = false;
   }
@@ -198,6 +189,7 @@ async function safeStartWA(force = false) {
     startingWA = false;
   }
 }
+
 // ====== WhatsApp ======
 async function startWA() {
   const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
@@ -212,26 +204,25 @@ async function startWA() {
     auth: state,
     logger,
     browser: Browsers.macOS("Chrome"),
-    agent,             // WSS via proxy
-    fetchAgent: agent, // HTTP via proxy
+    agent,             
+    fetchAgent: agent, 
     markOnlineOnConnect: false,
-    syncFullHistory: true,
+    syncFullHistory: true, // Importante: Sincroniza contatos
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
     shouldIgnoreJid: jid => {
       const j = String(jid);
-      // ignora grupos, listas de transmissão, status, newsletter
       return _isGroup(j) || _isBroadcast(j) || _isStatus(j) || _isNewsletter(j);
     }
   });
 
+  // Liga a memória ao socket
   store.bind(sock.ev);
 
   lastPongAt = Date.now();
   lastActivityAt = Date.now();
 
-  // observa pongs reais
   try {
     sock.ws?.on?.("pong", () => {
       lastPongAt = Date.now();
@@ -240,7 +231,6 @@ async function startWA() {
 
   sock.ev.on("creds.update", saveCreds);
 
-  // reconexão com jitter
   let reconnectDelay = 1500;
   const MAX_DELAY = 60_000;
 
@@ -278,7 +268,6 @@ async function startWA() {
       if (status === 428) {
         err428Count++;
         const base = 20_000;
-        // backoff com jitter, teto ~30min
         const hold = Math.min(
           (base * Math.pow(2, Math.min(err428Count, 6))) +
           Math.floor(Math.random() * base),
@@ -298,7 +287,6 @@ async function startWA() {
   // ===== Inbound =====
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
-      // só responde a eventos reais de chat
       if (type !== "notify") {
         logger.info({ type }, "messages.upsert ignorado (não-notify)");
         return;
@@ -313,7 +301,6 @@ async function startWA() {
           continue;
         }
 
-        // trava contra duplicados
         if (handledMessageIds.has(msgId)) {
           continue;
         }
@@ -342,8 +329,7 @@ async function startWA() {
         logger.info({ type, fromMe, jid, ct, msgId }, "RX upsert");
 
         if (fromMe) continue;
-  
-        // ... (O restante do código continua igual: extrair texto, readMessages, flow.handleText, etc.)
+
         const content = extractMessageContent(m.message) || {};
         const text =
           content.conversation ||
@@ -357,9 +343,7 @@ async function startWA() {
 
         if (!text) continue;
 
-        // marca lido + presença
         try { await sock.readMessages([m.key]); } catch {}
-        // ... resto do código ...
         try {
           await sock.presenceSubscribe(jid);
           await sock.sendPresenceUpdate("composing", jid);
