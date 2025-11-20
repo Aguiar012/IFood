@@ -54,7 +54,14 @@ if (typeof useMultiFileAuthState !== "function" || typeof makeWASocket !== "func
   throw new Error("CRÍTICO: Funções essenciais do Baileys não encontradas.");
 }
 
-// ====== 3. MEMÓRIA (STORE) - CORAÇÃO DA TRADUÇÃO ======
+// ====== HELPER FUNCTIONS (CORREÇÃO AQUI) ======
+// Adicionei estas funções de volta para evitar o ReferenceError
+const _isGroup = j => (isJidGroup ? isJidGroup(j) : String(j).endsWith("@g.us"));
+const _isBroadcast = j => (isJidBroadcast ? isJidBroadcast(j) : String(j).endsWith("@broadcast"));
+const _isStatus = j => (isJidStatusBroadcast ? isJidStatusBroadcast(j) : String(j) === "status@broadcast");
+const _isNewsletter = j => (isJidNewsletter ? isJidNewsletter(j) : String(j).endsWith("@newsletter"));
+
+// ====== 3. MEMÓRIA (STORE) ======
 let store;
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
@@ -63,7 +70,6 @@ if (typeof makeInMemoryStore === 'function') {
         try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
     }, 10_000);
 } else {
-    // Fallback simples caso a função não exista
     logger.warn("⚠️ Usando memória simples (fallback).");
     store = {
         contacts: {},
@@ -193,12 +199,13 @@ async function startWA() {
     agent,             
     fetchAgent: agent, 
     markOnlineOnConnect: false,
-    syncFullHistory: true, // <--- ESSENCIAL
+    syncFullHistory: true,
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
     shouldIgnoreJid: jid => {
       const j = String(jid);
+      // Agora as funções _isGroup existem!
       return _isGroup(j) || _isBroadcast(j) || _isStatus(j) || _isNewsletter(j);
     }
   });
@@ -234,7 +241,7 @@ async function startWA() {
     }
   });
 
-  // ===== 8. HANDLER DE MENSAGENS (AQUI ESTÁ A PROTEÇÃO) =====
+  // ===== 8. HANDLER DE MENSAGENS =====
   sock.ev.on("messages.upsert", async ({ messages, type }) => {
     try {
       if (type !== "notify" || !messages?.length) return;
@@ -251,32 +258,25 @@ async function startWA() {
         if (jid.includes("@lid")) {
             let resolved = false;
             
-            // Tenta achar o número real na memória
             if (store && store.contacts) {
                  const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
                  const contact = store.contacts[lidKey];
                  
                  if (contact && contact.id && !contact.id.includes("@lid")) {
-                     jid = contact.id; // SUCESSO: ID substituído pelo número real
+                     jid = contact.id; 
                      resolved = true;
                  }
             }
 
-            // SE NÃO CONSEGUIU TRADUZIR, PARA TUDO!
             if (!resolved) {
-                // Se formos nós mesmos (Web) mandando msg, precisamos avisar para usar o celular
-                // Se for o usuário, não conseguimos saber quem é sem o 'store'
-                
                 if (!fromMe) {
                     logger.warn({ jid }, "LID não identificado. Solicitando sync via celular.");
                     await sock.sendMessage(jid, { text: "🔄 *Atenção*\n\nIdentifiquei que você está usando o WhatsApp Web, mas o sistema ainda não sincronizou seu número.\n\nPor favor, envie um *'Oi'* usando seu **CELULAR** agora.\n\nIsso é necessário apenas uma vez para corrigir o cadastro." });
                 }
-                // AQUI É O SEGREDO: CONTINUE impede que o código salve o LID no banco
                 continue; 
             }
         }
 
-        // Normalização padrão (se passou pela trava, 'jid' já é o número real)
         if (jidNormalizedUser) jid = jidNormalizedUser(jid);
         
         if (!jid || jid.endsWith("@status")) continue;
@@ -309,7 +309,6 @@ async function startWA() {
 
         let reply = "";
         try {
-          // Agora 'jid' é GARANTIDAMENTE o número de telefone
           reply = await flow.handleText(jid, text);
         } catch (e) {
           logger.error({ err: String(e) }, "Erro no fluxo");
