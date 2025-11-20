@@ -34,7 +34,7 @@ const _isNewsletter = j => (isJidNewsletter?.(j)) || String(j).endsWith("@newsle
 import paths from "../paths.js";
 import { createConversaFlow } from "./conversa_flow.js";
 
-// ====== ENV (DEFINIÇÃO DAS VARIÁVEIS) ======
+// ====== ENV ======
 const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
@@ -43,24 +43,22 @@ fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
 
 // janelas de saúde
 const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "10");
-const PING_EVERY_MS = 300_000; 
-const PONG_GRACE_MS = 600_000; 
+const PING_EVERY_MS = 300_000;
+const PONG_GRACE_MS = 600_000;
 
-// ====== LOG/HTTP ======
+// ====== 1. LOG/HTTP (CRIADO PRIMEIRO AGORA!) ======
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
 const app = express();
 app.use(express.json());
 
-// ====== STORE (AGORA SIM: DEPOIS DE DATA_DIR SER CRIADO) ======
+// ====== 2. STORE (AGORA FUNCIONA POIS O LOGGER JÁ EXISTE) ======
 const store = makeInMemoryStore({ logger });
 try {
-  // Tenta ler o arquivo se existir
   store.readFromFile(path.join(DATA_DIR, 'baileys_store.json'));
 } catch (err) {
   logger.info("Nenhum arquivo de store encontrado, criando novo.");
 }
 setInterval(() => {
-  // Salva a cada 10s
   try {
     store.writeToFile(path.join(DATA_DIR, 'baileys_store.json'));
   } catch {}
@@ -207,7 +205,7 @@ async function startWA() {
     agent,             
     fetchAgent: agent, 
     markOnlineOnConnect: false,
-    syncFullHistory: true, // Importante: Sincroniza contatos
+    syncFullHistory: true,
     connectTimeoutMs: 60_000,
     keepAliveIntervalMs: 15_000,
     printQRInTerminal: false,
@@ -217,7 +215,6 @@ async function startWA() {
     }
   });
 
-  // Liga a memória ao socket
   store.bind(sock.ev);
 
   lastPongAt = Date.now();
@@ -308,21 +305,17 @@ async function startWA() {
 
         const fromMe = !!m.key?.fromMe;
         
-        // 1. Define o JID bruto
         let jid = m.key?.remoteJid || "";
 
-        // 2. Fix para converter LID (Web) em Número Real usando a Store
+        // Fix para converter LID (Web) em Número Real
         if (jid.includes("@lid")) {
             const contact = store.contacts[jidNormalizedUser(jid)];
             if (contact && contact.id && !contact.id.includes("@lid")) {
-                jid = contact.id; // Achou! Usa o número real
+                jid = contact.id; 
             } 
         }
 
-        // 3. Normaliza final
         jid = jidNormalizedUser(jid);
-        
-        // 4. Verifica se é válido
         if (!jid || jid.endsWith("@status")) continue;
 
         const ct = getContentType(m.message);
