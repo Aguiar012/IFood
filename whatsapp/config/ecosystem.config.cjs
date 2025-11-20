@@ -2,6 +2,7 @@ module.exports = {
 apps: [
   {
     name: "aviso_suap",
+    cwd: '/app',
     script: "whatsapp/aviso_suap/avisador_suap.js",
     autorestart: false,
     env: {
@@ -15,6 +16,7 @@ apps: [
   },
   {
     name: "conversazap",
+    cwd: '/app',
     script: "whatsapp/chatbot/conversa_zap.js",
     autorestart: false,
     env: {
