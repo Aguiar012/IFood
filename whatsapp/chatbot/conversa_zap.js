@@ -1,5 +1,5 @@
 // whatsapp/chatbot/conversa_zap.js
-const express = require('express')
+import express from 'express';
 import P from "pino";
 import qrcode from "qrcode-terminal";
 import { Boom } from "@hapi/boom";
