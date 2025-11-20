@@ -40,10 +40,11 @@ const DATA_DIR = process.env.DATA_DIR || "/app/data";
 const WA_AUTH_DIR = paths.WA_AUTH_DIR;
 fs.mkdirSync(WA_AUTH_DIR, { recursive: true });
 
+
 // janelas de saúde
-const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "6"); // minutos sem pong => falhar /health
-const PING_EVERY_MS = 45_000;
-const PONG_GRACE_MS = 120_000;
+const LIVENESS_FAIL_MIN = Number(process.env.LIVENESS_FAIL_MIN ?? "10");
+const PING_EVERY_MS = 300_000; // Verificação a cada 5 minutos (300.000ms)
+const PONG_GRACE_MS = 600_000; // Tolerância de 10 minutos sem resposta
 
 // ====== LOG/HTTP ======
 const logger = P({ level: process.env.LOG_LEVEL || "info" });
