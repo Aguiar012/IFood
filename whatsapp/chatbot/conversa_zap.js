@@ -51,7 +51,7 @@ if (!useMultiFileAuthState || !makeWASocket) {
   throw new Error("CRÍTICO: Funções do Baileys não encontradas.");
 }
 
-// ====== 3. MEMÓRIA (Tentativa de Tradução) ======
+// ====== 3. MEMÓRIA ======
 let store;
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
@@ -109,7 +109,7 @@ function toJid(to){
   return (to.endsWith("@s.whatsapp.net") || to.endsWith("@g.us")) ? to : `${to.replace(/\D/g,"")}@s.whatsapp.net`;
 }
 async function sendWA(to, text){
-  if (!waReady) throw new Error("WhatsApp desconectado");
+  if (!waReady || !sock) throw new Error("WhatsApp desconectado"); // Proteção contra null
   const jid = toJid(to);
   const sent = await sock.sendMessage(jid, { text });
   lastActivityAt = Date.now();
@@ -119,6 +119,7 @@ function cleanupSock() {
   try { sock?.end?.(); } catch {}
   try { sock?.ws?.close?.(); } catch {}
   sock = null;
+  waReady = false;
 }
 
 // ====== 6. WATCHDOG ======
@@ -229,7 +230,7 @@ async function startWA() {
             const fromMe = !!m.key?.fromMe;
             let jid = m.key?.remoteJid || "";
 
-            // 1. Tenta traduzir (Melhor Esforço)
+            // 1. Tenta traduzir LID -> Número Real (Melhor Esforço)
             if (jid.includes("@lid")) {
                 const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
                 
@@ -238,14 +239,13 @@ async function startWA() {
                     const c = store.contacts[lidKey];
                     if (c.id && !c.id.includes("@lid")) jid = c.id;
                 }
-                // Se falhar, paciência. Segue o baile com o ID que tem.
             }
 
             if (jidNormalizedUser) jid = jidNormalizedUser(jid);
             if (!jid || jid.endsWith("@status")) continue;
 
             const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-            logger.info({ jid, ct }, "Mensagem recebida (Liberada)");
+            logger.info({ jid, ct }, "Mensagem processada");
 
             if (fromMe) continue;
 
@@ -260,8 +260,11 @@ async function startWA() {
             try { reply = await flow.handleText(jid, text); } 
             catch (e) { logger.error(e, "Erro fluxo"); }
             
-            if (reply) await sock.sendMessage(jid, { text: reply });
-            lastActivityAt = Date.now();
+            // Proteção contra envio sem conexão
+            if (reply && sock && waReady) {
+                await sock.sendMessage(jid, { text: reply });
+                lastActivityAt = Date.now();
+            }
         }
       });
 
