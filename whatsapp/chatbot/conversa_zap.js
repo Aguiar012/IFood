@@ -51,22 +51,25 @@ if (!useMultiFileAuthState || !makeWASocket) {
   throw new Error("CRÍTICO: Funções do Baileys não encontradas.");
 }
 
-// ====== 3. MEMÓRIA ======
+// ====== 3. MEMÓRIA PERSISTENTE ======
 let store;
 if (typeof makeInMemoryStore === 'function') {
     store = makeInMemoryStore({ logger });
-    try { store.readFromFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
+    // Tenta ler do disco na inicialização
+    try { 
+        if (fs.existsSync(path.join(DATA_DIR, 'baileys_store.json'))) {
+            store.readFromFile(path.join(DATA_DIR, 'baileys_store.json'));
+            logger.info("Memória carregada do disco com sucesso.");
+        }
+    } catch(e) { logger.error("Erro ao ler store:", e); }
+
+    // Salva a cada 10s
     setInterval(() => {
         try { store.writeToFile(path.join(DATA_DIR, 'baileys_store.json')); } catch {}
     }, 10_000);
 } else {
-    store = {
-        contacts: {},
-        bind: (ev) => {
-            ev.on('contacts.upsert', (u) => { for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c); });
-            ev.on('contacts.update', (u) => { for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); });
-        }
-    };
+    // Fallback para evitar crash
+    store = { contacts: {}, bind: () => {}, readFromFile: () => {}, writeToFile: () => {} };
 }
 
 // ====== 4. FLUXO ======
@@ -121,13 +124,51 @@ function cleanupSock() {
   sock = null;
 }
 
-// ====== 6. START WA ======
-async function startWA() {
+// ====== 6. WATCHDOG ======
+// Relaxado para evitar loops de restart
+const PING_EVERY_MS = 300_000; 
+const PONG_GRACE_MS = 600_000; 
+
+function armWaWatchdog() {
+  if (wdTimer) return;
+  wdTimer = setInterval(async () => {
+    const now = Date.now();
+    const stale = false; 
+    const noPong = now - lastPongAt > PONG_GRACE_MS; 
+    const wsDead = !(sock?.ws) || (sock?.ws?.readyState !== 1);
+
+    try { if (sock?.ws?.readyState === 1) { sock.ws.ping?.(); } } catch {}
+
+    if (noPong || stale || wsDead || !waReady) {
+      logger.warn({ waReady, wsReady: sock?.ws?.readyState }, "Watchdog: restart");
+      await safeStartWA(true);
+    }
+  }, PING_EVERY_MS);
+}
+
+let _saveCredsRef = async () => {};
+let _sigHooked = false;
+function registerSaveCreds(fn){
+  _saveCredsRef = fn;
+  if (_sigHooked) return;
+  _sigHooked = true;
+  for (const sig of ["SIGINT","SIGTERM"]) {
+    process.on(sig, async () => { try { await _saveCredsRef(); } catch {} process.exit(0); });
+  }
+}
+
+async function safeStartWA(force = false) {
+  if (startingWA && !force) return;
   if (startingWA) return;
   startingWA = true;
-  
+  try { cleanupSock(); await startWA(); } finally { startingWA = false; }
+}
+
+// ====== 7. START WA ======
+async function startWA() {
   try {
       const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
+      registerSaveCreds(saveCreds);
       const { version } = await fetchLatestBaileysVersion();
       const agent = await buildProxyAgent(PROXY_URL);
 
@@ -156,7 +197,7 @@ async function startWA() {
         if (qr) {
           globalThis.__lastQR = qr;
           qrcode.generate(qr, { small: true });
-          logger.info("QR Code gerado.");
+          logger.info("QR Code pronto.");
         }
         if (connection === "open") {
           waReady = true;
@@ -192,46 +233,55 @@ async function startWA() {
             const fromMe = !!m.key?.fromMe;
             let jid = m.key?.remoteJid || "";
 
-            // 1. Tenta traduzir LID -> Número Real
+            // ====== TRADUÇÃO ROBUSTA (WEB -> CELULAR) ======
+            // Se for LID, tentamos encontrar o número real a todo custo
             if (jid.includes("@lid")) {
                 let resolved = false;
-                
-                // A) Se for o PRÓPRIO bot (você testando), usa o ID da conexão
-                if (fromMe && sock.user && sock.user.id) {
-                     const myPhone = jidNormalizedUser(sock.user.id);
-                     if (!myPhone.includes("@lid")) {
-                         jid = myPhone;
+                const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
+
+                // 1. Tentativa Direta
+                if (store && store.contacts) {
+                     let contact = store.contacts[lidKey];
+                     if (contact && contact.id && !contact.id.includes("@lid")) {
+                         jid = contact.id;
                          resolved = true;
                      }
                 }
 
-                // B) Se não resolveu, procura na memória (contatos)
+                // 2. BUSCA REVERSA (Varredura Completa) - Aqui está o Pulo do Gato
                 if (!resolved && store && store.contacts) {
-                    const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-                    const contact = store.contacts[lidKey] || store.contacts[jid];
-                    if (contact && contact.id && !contact.id.includes("@lid")) {
-                        jid = contact.id;
-                        resolved = true;
+                    const allContacts = Object.values(store.contacts);
+                    // Procura qualquer contato que tenha esse 'lid' como propriedade
+                    const found = allContacts.find(c => c.lid === lidKey || (c.id && c.id.includes("@lid") && c.id === lidKey));
+                    
+                    if (found) {
+                        // Se achamos o contato pelo LID, verificamos se ele tem um ID "normal" (telefone)
+                        // Às vezes o ID principal do contato é o telefone, e o LID é uma prop.
+                        if (found.id && !found.id.includes("@lid")) {
+                            jid = found.id;
+                            resolved = true;
+                            logger.info({ from: lidKey, to: jid }, "LID traduzido via Busca Reversa!");
+                        } else if (found.notify || found.name) {
+                             // Se achou o contato mas o ID ainda é LID, tenta inferir ou logar
+                             logger.info({ found }, "Contato encontrado mas ID ainda é LID. Tentando usar notify/name?");
+                        }
                     }
+                }
+
+                if (!resolved) {
+                    logger.warn({ jid }, "⚠️ FALHA NA TRADUÇÃO: Não consegui achar o número real na memória.");
+                    // AQUI REMOVEMOS O BLOQUEIO. O CÓDIGO VAI TENTAR RODAR MESMO ASSIM.
+                    // Se falhar no banco, falhou. Mas não vamos ignorar o usuário.
                 }
             }
 
-            // 2. Normalização final
+            // Normalização final
             if (jidNormalizedUser) jid = jidNormalizedUser(jid);
-
-            // 3. PORTÃO DE FERRO: Se ainda for @lid, ABORTA IMEDIATAMENTE.
-            // Isso impede que o ID errado seja salvo no banco.
-            if (jid.includes("@lid")) {
-                logger.warn({ jid }, "⚠️ ID Web não traduzido. Ignorando para proteger o banco.");
-                // Não envia mensagem, não faz nada. Apenas ignora até sincronizar.
-                continue; 
-            }
             
             if (!jid || jid.endsWith("@status")) continue;
 
-            // Se chegou aqui, 'jid' é GARANTIDAMENTE um número de telefone válido.
             const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-            logger.info({ jid, ct }, "Mensagem processada com sucesso (ID Real)");
+            logger.info({ jid, ct }, "Processando mensagem...");
 
             if (fromMe) continue;
 
