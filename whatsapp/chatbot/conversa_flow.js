@@ -14,6 +14,12 @@ function norm(s = "") {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
+function isValidBrasilPhone(phone = "") {
+  // 55 + 11 dígitos (DDD + 9 dígitos)
+  return /^55\d{11}$/.test(onlyDigits(phone));
+}
+
+
 // ---- dias da semana ----
 function parseDiasLista(txt = "") {
   const map = {
@@ -510,6 +516,20 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     if (!aluno) {
       // fast-forward do consentimento: agora só pedimos PT (sem PT no BD)
       if (["sim", "s", "ok", "yes", "continuar"].includes(n)) {
+        // --- BLOQUEIO DE CADASTRO POR WHATSAPP WEB / LID ---
+        if (!isValidBrasilPhone(phone)) {
+          // não mexe no step, só avisa e impede cadastro
+          return (
+            header(null, null) +
+            "*Primeiro cadastro só pode ser feito a partir do WhatsApp do celular.*\n\n" +
+            "Pra garantir que o cadastro ligue você ao seu telefone de verdade, faça o *primeiro cadastro* assim:\n" +
+            "1. Abra o *WhatsApp no seu celular* com o número que você usa no SUAP.\n" +
+            "2. Envie a mensagem *CONTINUAR* pro robô.\n\n" +
+            "Depois de cadastrado, você pode usar o bot normalmente pelo WhatsApp Web."
+          );
+        }
+        // ---------------------------------------------------
+        
         setUser(jid, { step: "ASK_PRONT", temp: {} });
         return (
           header(null, null) +
