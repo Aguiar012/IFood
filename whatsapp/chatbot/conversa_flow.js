@@ -1,4 +1,3 @@
-// whatsapp/chatbot/conversa_flow.js
 import fs from "fs";
 import path from "path";
 import { Pool } from "pg";
@@ -313,11 +312,11 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     for (const nome of nomes.map(strip).filter(Boolean)) {
       await c.query(
         `INSERT INTO prato_bloqueado (aluno_id, nome)
-         SELECT $1, $2
-         WHERE NOT EXISTS (
-           SELECT 1 FROM prato_bloqueado
-           WHERE aluno_id=$1 AND lower(nome)=lower($2)
-         )`,
+          SELECT $1, $2
+          WHERE NOT EXISTS (
+            SELECT 1 FROM prato_bloqueado
+            WHERE aluno_id=$1 AND lower(nome)=lower($2)
+          )`,
         [alunoId, nome]
       );
     }
@@ -330,7 +329,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   async function getPreferenciasDias(c, alunoId) {
     const { rows } = await c.query(
       `SELECT dia_semana
-         FROM preferencia_dia
+          FROM preferencia_dia
         WHERE aluno_id = $1
         ORDER BY dia_semana`,
       [alunoId]
@@ -341,7 +340,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   async function getBloqueiosAluno(c, alunoId) {
     const { rows } = await c.query(
       `SELECT nome
-         FROM prato_bloqueado
+          FROM prato_bloqueado
         WHERE aluno_id = $1
         ORDER BY nome`,
       [alunoId]
@@ -352,7 +351,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   async function getUltimoPedido(c, alunoId) {
     const { rows } = await c.query(
       `SELECT dia_pedido, motivo
-         FROM pedido
+          FROM pedido
         WHERE aluno_id = $1
         ORDER BY dia_pedido DESC, id DESC
         LIMIT 1`,
@@ -364,7 +363,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   async function getUltimosPedidos(c, alunoId) {
     const { rows } = await c.query(
       `SELECT dia_pedido, motivo
-         FROM pedido
+          FROM pedido
         WHERE aluno_id = $1
           AND dia_pedido >= (CURRENT_DATE - INTERVAL '7 days')
         ORDER BY dia_pedido DESC, id DESC`,
@@ -378,12 +377,12 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return (
       header(aluno, ultimoPedido) +
       "Menu principal\n\n" +
-      "• *Cancelar*  → mandar e-mail de cancelamento de almoço para a CAE\n" +
-      "• *Preferência*  → escolher dias em que você costuma almoçar no câmpus\n" +
-      "• *Bloquear*  → informar pratos que você não come / quer evitar\n" +
-      "• *Ativar* / *Desativar*  → ligar ou pausar seu cadastro\n" +
-      "• *Status*  → ver seus dados, dias cadastrados e pratos bloqueados\n" +
-      "• *Histórico*  → ver pedidos dos últimos dias e o motivo de cada um\n\n" +
+      "• *Cancelar* → mandar e-mail de cancelamento de almoço para a CAE\n" +
+      "• *Preferência* → escolher dias em que você costuma almoçar no câmpus\n" +
+      "• *Bloquear* → informar pratos que você não come / quer evitar\n" +
+      "• *Ativar* / *Desativar* → ligar ou pausar seu cadastro\n" +
+      "• *Status* → ver seus dados, dias cadastrados e pratos bloqueados\n" +
+      "• *Histórico* → ver pedidos dos últimos dias e o motivo de cada um\n\n" +
       "Pra ver esse menu de novo, envie: *Ajuda*."
     );
   }
@@ -510,54 +509,47 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     if (!aluno) {
       // fast-forward do consentimento: agora só pedimos PT (sem PT no BD)
         
-        setUser(jid, { step: "ASK_PRONT", temp: {} });
-        return (
-          header(null, null) +
-          "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
-          "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
-        );
-      }
-
-      if (u.step === "NEW") {
-        setUser(jid, { step: "ASK_CONSENT", temp: {} });
-        return ONBOARDING;
-      }
-
-      if (u.step === "ASK_CONSENT") {
-        return (
-          header(null, null) +
-          "Tranquilo, sem problemas.\n\n" +
-          "Quando você quiser usar o sistema automático de pedidos de almoço do IFSP Pirituba,\n" +
-          "basta responder *CONTINUAR*."
-        );
-      }
-
-      if (u.step === "ASK_PRONT") {
-        // remove espaços, PT no começo e tudo que não for dígito
-        let pront = strip(text)
-          .replace(/\s+/g, "")
-          .toUpperCase()
-          .replace(/^PT/, "");
-        pront = pront.replace(/\D/g, "");
-
-        if (!/^\d{5,12}$/.test(pront)) {
-          return (
-            header(null, null) +
-            "*Formato de prontuário inválido.*\n\n" +
-            "Envie algo como *3029791*.\n" +
-            "Use o mesmo código numérico que aparece no SUAP (sem PT)."
-          );
+        if (u.step === "ASK_PRONT") {
+            // remove espaços, PT no começo e tudo que não for dígito
+            let pront = strip(text)
+              .replace(/\s+/g, "")
+              .toUpperCase()
+              .replace(/^PT/, "");
+            pront = pront.replace(/\D/g, "");
+    
+            if (!/^\d{5,12}$/.test(pront)) {
+              return (
+                header(null, null) +
+                "*Formato de prontuário inválido.*\n\n" +
+                "Envie algo como *3029791*.\n" +
+                "Use o mesmo código numérico que aparece no SUAP (sem PT)."
+              );
+            }
+    
+            setUser(jid, { step: "ASK_DIAS_REG", temp: { prontuario: pront } });
+    
+            return (
+              header(null, null) +
+              "*Prontuário recebido!*\n\n" +
+              "Agora me diga em quais dias você *costuma almoçar* no câmpus.\n" +
+              "Exemplo: *seg, ter, qua, qui, sex*."
+            );
+        }
+    
+        if (u.step === "NEW") {
+           setUser(jid, { step: "ASK_CONSENT", temp: {} });
+           return ONBOARDING;
         }
 
-        setUser(jid, { step: "ASK_DIAS_REG", temp: { prontuario: pront } });
-
-        return (
-          header(null, null) +
-          "*Prontuário recebido!*\n\n" +
-          "Agora me diga em quais dias você *costuma almoçar* no câmpus.\n" +
-          "Exemplo: *seg, ter, qua, qui, sex*."
-        );
-      }
+        if (u.step === "ASK_CONSENT") {
+           // Se respondeu CONTINUAR ou similar
+           setUser(jid, { step: "ASK_PRONT", temp: {} });
+           return (
+             header(null, null) +
+             "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
+             "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
+           );
+        }
 
       if (u.step === "ASK_DIAS_REG") {
         const dias = parseDiasLista(text);
@@ -600,8 +592,13 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
               "Se isso estiver errado, procure a CAE ou o responsável pelo projeto."
             );
           }
+          return (
+             header(null, null) +
+             "Tive um problema ao salvar seu cadastro.\n" +
+             "Tenta novamente mais tarde ou fala com o responsável pelo projeto."
+           );
         }
-        
+
         const alunoBanco = {
           nome: res.aluno?.nome,
           prontuario: res.aluno?.prontuario,
@@ -620,16 +617,24 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           "• Enviar *Bloquear* para registrar pratos que não come.\n\n" +
           "Envie *Ajuda* para ver o menu completo."
         );
-      } // Fecha if (u.step === "ASK_DIAS_REG")
+      }
 
       // fallback enquanto não cadastrado
+      // Se não for nenhum step específico, mas mandou algo:
+      if (u.step === "ASK_CONSENT" && !n.includes("continuar")) {
+          return (
+            header(null, null) +
+            "Tranquilo, sem problemas.\n\n" +
+            "Quando você quiser usar o sistema automático de pedidos de almoço do IFSP Pirituba,\n" +
+            "basta responder *CONTINUAR*."
+          );
+      }
+
       return ONBOARDING;
-    } // <--- AQUI ESTAVA O PERIGO: Esta chave fecha o if (!aluno)
+    }
 
     // ================= aluno já conhecido =================
-    // O código continua DENTRO da função handleText aqui
     const alunoAtual = aluno;
-
 
     if (u.step === "SET_DIAS") {
       const dias = parseDiasLista(text);
