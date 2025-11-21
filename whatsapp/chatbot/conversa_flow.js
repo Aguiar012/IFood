@@ -375,7 +375,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           FROM pedido
         WHERE aluno_id = $1
           AND dia_pedido >= (CURRENT_DATE - INTERVAL '7 days')
-          AND motivo NOT ILIKE '%anteriormente%'
+          AND motivo NOT ILIKE '%anteriormente%' AND motivo NOT LIKE '%Final%'
         ORDER BY dia_pedido DESC, id DESC`,
       [alunoId]
     );
