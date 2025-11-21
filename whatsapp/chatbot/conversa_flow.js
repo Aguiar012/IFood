@@ -354,13 +354,13 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return rows.map(r => r.nome);
   }
 
-  // [CORREÇÃO 1] Adicionado filtro para ignorar "anteriormente" (redundância)
+  // [CORREÇÃO 1] Adicionado filtro para ignorar "anteriormente" (redundância) e "Erros de Finais de Semana"
   async function getUltimoPedido(c, alunoId) {
     const { rows } = await c.query(
       `SELECT dia_pedido, motivo
           FROM pedido
         WHERE aluno_id = $1
-          AND motivo NOT ILIKE '%anteriormente%' 
+          AND motivo NOT ILIKE '%anteriormente%' AND motivo NOT LIKE '%Final%' 
         ORDER BY dia_pedido DESC, id DESC
         LIMIT 1`,
       [alunoId]
