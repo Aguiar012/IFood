@@ -506,8 +506,10 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     }
 
     // ================= cadastro (ainda não existe no banco) =================
+    // ================= cadastro (ainda não existe no banco) =================
     if (!aluno) {
       
+      // 1. Se já estiver esperando o prontuário, processa o número
       if (u.step === "ASK_PRONT") {
           // remove espaços, PT no começo e tudo que não for dígito
           let pront = strip(text)
@@ -534,97 +536,33 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
             "Exemplo: *seg, ter, qua, qui, sex*."
           );
       }
+
+      // 2. [CORREÇÃO] Regra Global para "Continuar"
+      // Se o usuário disser "continuar", força o início do cadastro, 
+      // mesmo se o estado tiver sido perdido (resetado para NEW).
+      if (n.includes("continuar") || n.includes("sim") || n.includes("bora") || n.includes("quero")) {
+          setUser(jid, { step: "ASK_PRONT", temp: {} });
+          return (
+            header(null, null) +
+            "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
+            "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
+          );
+      }
   
-      // [CORREÇÃO IMPORTANTE] Bloco consolidado para ASK_CONSENT
+      // 3. Se o usuário recusou ou falou outra coisa no passo de consentimento
       if (u.step === "ASK_CONSENT") {
-         if (n.includes("continuar") || n.includes("sim") || n.includes("bora")) {
-             setUser(jid, { step: "ASK_PRONT", temp: {} });
-             return (
-               header(null, null) +
-               "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
-               "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
-             );
-         } else {
              return (
                 header(null, null) +
                 "Tranquilo, sem problemas.\n\n" +
                 "Quando você quiser usar o sistema automático de pedidos de almoço do IFSP Pirituba,\n" +
                 "basta responder *CONTINUAR*."
              );
-         }
       }
 
+      // 4. Novo usuário (ou estado perdido) -> Manda o Onboarding
       if (u.step === "NEW") {
          setUser(jid, { step: "ASK_CONSENT", temp: {} });
          return ONBOARDING;
-      }
-
-      if (u.step === "ASK_DIAS_REG") {
-        const dias = parseDiasLista(text);
-        if (!dias.length) {
-          return (
-            header(null, null) +
-            "Não entendi os dias.\n\n" +
-            "Exemplos válidos: *seg, qua, sex* ou *segunda, terça, quinta*."
-          );
-        }
-
-        const pront = u.temp?.prontuario;
-        if (!pront) {
-          setUser(jid, { step: "NEW", temp: {} });
-          return ONBOARDING;
-        }
-
-        const res = await withConn(async c => {
-          const vinculo = await ensureAlunoContato(c, { prontuario: pront, telefone: phone });
-          if (!vinculo.ok) return vinculo;
-          await setPreferenciasDias(c, vinculo.alunoId, dias);
-          await setAtivo(c, vinculo.alunoId, true);
-          return vinculo;
-        });
-
-        if (!res.ok) {
-          if (res.reason === "NAO_TURMA") {
-            return (
-              header(null, null) +
-              "*Prontuário não encontrado na turma do piloto.*\n\n" +
-              "Este teste está habilitado só para o *2º ano de Redes*.\n" +
-              "Confere se você digitou o código igual ao do SUAP."
-            );
-          }
-          if (res.reason === "JA_VINCULADO") {
-            return (
-              header(null, null) +
-              "*Esse prontuário já foi cadastrado antes.*\n\n" +
-              "Ele já está vinculado a outro número de WhatsApp.\n" +
-              "Se isso estiver errado, procure a CAE ou o responsável pelo projeto."
-            );
-          }
-          return (
-             header(null, null) +
-             "Tive um problema ao salvar seu cadastro.\n" +
-             "Tenta novamente mais tarde ou fala com o responsável pelo projeto."
-           );
-        }
-
-        const alunoBanco = {
-          nome: res.aluno?.nome,
-          prontuario: res.aluno?.prontuario,
-          ativo: true
-        };
-
-        setUser(jid, { step: "MAIN", temp: {}, aluno_id: res.alunoId });
-
-        return (
-          header(alunoBanco, null) +
-          "*Cadastro concluído no sistema automático de pedidos (piloto 2º ano Redes).* \n\n" +
-          `Dias preferidos registrados: *${diasHumanos(dias)}*.\n\n` +
-          "A partir de agora, você pode:\n" +
-          "• Enviar *Cancelar* para mandar um e-mail de cancelamento de almoço.\n" +
-          "• Enviar *Preferência* para alterar os dias.\n" +
-          "• Enviar *Bloquear* para registrar pratos que não come.\n\n" +
-          "Envie *Ajuda* para ver o menu completo."
-        );
       }
 
       // fallback enquanto não cadastrado
