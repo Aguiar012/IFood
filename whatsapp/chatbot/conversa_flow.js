@@ -4,6 +4,7 @@ import { Pool } from "pg";
 import nodemailer from "nodemailer";
 
 function onlyDigits(s = "") { return (s || "").replace(/\D/g, ""); }
+// Extrai apenas os números para usar como chave estável (ignora @s.whatsapp.net ou @lid)
 function jidToPhone(jid = "") { return onlyDigits(String(jid).split("@")[0]); }
 function strip(s = "") { return String(s || "").trim(); }
 function norm(s = "") {
@@ -168,12 +169,13 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     try { fs.writeFileSync(STORE_FILE, JSON.stringify(state)); } catch { }
   }
 
-  function getUser(jid) {
-    return state[jid] || (state[jid] = { step: "NEW", temp: {} });
+  // AGORA USAMOS A CHAVE DO USUÁRIO (userKey) E NÃO O JID DIRETO
+  function getUser(userKey) {
+    return state[userKey] || (state[userKey] = { step: "NEW", temp: {} });
   }
 
-  function setUser(jid, patch) {
-    state[jid] = { ...(state[jid] || { step: "NEW", temp: {} }), ...patch };
+  function setUser(userKey, patch) {
+    state[userKey] = { ...(state[userKey] || { step: "NEW", temp: {} }), ...patch };
     saveState();
   }
 
@@ -194,7 +196,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
     const subject = `Cancelamento de almoço - ${prontCompleto} - ${dataStr}`;
     
-    // Corpo em HTML para melhor visualização e facilidade
     const html = `
       <div style="font-family: Arial, sans-serif; color: #333;">
         <h2 style="color: #d9534f;">Solicitação de Cancelamento de Almoço</h2>
@@ -217,7 +218,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       </div>
     `;
 
-    // Mantemos o texto puro como fallback
     const text = `Solicitação de cancelamento:\nAluno: ${nome}\nProntuário: ${prontNumerico}\nData: ${dataStr}`;
 
     try {
@@ -225,10 +225,9 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         from: `"Assistente de Almoço IFSP Pirituba" <${GMAIL_USER}>`,
         to: CAE_EMAIL,
         subject,
-        text, // Fallback texto puro
-        html, // Versão HTML rica
+        text,
+        html,
       });
-      logger.info?.("E-mail de cancelamento enviado com sucesso para", CAE_EMAIL);
       return { ok: true };
     } catch (err) {
       logger.error("Erro ao enviar e-mail de cancelamento:", err);
@@ -372,7 +371,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return rows;
   }
 
-  // --------- textos de apoio ----------
   function helpText(aluno, ultimoPedido) {
     return (
       header(aluno, ultimoPedido) +
@@ -399,12 +397,17 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     const text = strip(textRaw);
     if (!text) return null;
 
-    const u = getUser(jid);
-    const phone = jidToPhone(jid);
+    // CRÍTICO: Usamos o userKey (apenas números) para identificar o usuário.
+    // Isso evita que @lid e @s.whatsapp.net sejam vistos como pessoas diferentes.
+    const userKey = jidToPhone(jid);
+    const u = getUser(userKey);
+
+    // Usamos o userKey também para buscas no banco (assumindo que salvamos assim)
+    const phone = userKey;
 
     const aluno = await withConn(c => findAlunoByTelefone(c, phone));
     if (aluno && !u.aluno_id) {
-      setUser(jid, { aluno_id: aluno.id, step: "MAIN", temp: {} });
+      setUser(userKey, { aluno_id: aluno.id, step: "MAIN", temp: {} });
     }
 
     const ultimoPedido = aluno
@@ -415,7 +418,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
     // atalhos globais
     if (["ajuda", "menu", "help", "comandos"].includes(n)) {
-      setUser(jid, { step: "MAIN", temp: {} });
+      setUser(userKey, { step: "MAIN", temp: {} });
       return helpText(aluno || null, ultimoPedido);
     }
 
@@ -506,12 +509,10 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     }
 
     // ================= cadastro (ainda não existe no banco) =================
-    // ================= cadastro (ainda não existe no banco) =================
     if (!aluno) {
       
-      // 1. Se já estiver esperando o prontuário, processa o número
+      // 1. Processa prontuário (se estiver no passo certo)
       if (u.step === "ASK_PRONT") {
-          // remove espaços, PT no começo e tudo que não for dígito
           let pront = strip(text)
             .replace(/\s+/g, "")
             .toUpperCase()
@@ -527,7 +528,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
             );
           }
   
-          setUser(jid, { step: "ASK_DIAS_REG", temp: { prontuario: pront } });
+          setUser(userKey, { step: "ASK_DIAS_REG", temp: { prontuario: pront } });
   
           return (
             header(null, null) +
@@ -536,20 +537,17 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
             "Exemplo: *seg, ter, qua, qui, sex*."
           );
       }
-
-      // 2. [CORREÇÃO] Regra Global para "Continuar"
-      // Se o usuário disser "continuar", força o início do cadastro, 
-      // mesmo se o estado tiver sido perdido (resetado para NEW).
-      if (n.includes("continuar") || n.includes("sim") || n.includes("bora") || n.includes("quero")) {
-          setUser(jid, { step: "ASK_PRONT", temp: {} });
-          return (
-            header(null, null) +
-            "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
-            "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
-          );
-      }
   
-      // 3. Se o usuário recusou ou falou outra coisa no passo de consentimento
+      // 2. Gatilho GLOBAL de Continuar (Evita loops se o estado se perder)
+      if (n.includes("continuar") || n.includes("sim") || n.includes("bora") || n.includes("quero")) {
+             setUser(userKey, { step: "ASK_PRONT", temp: {} });
+             return (
+               header(null, null) +
+               "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
+               "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
+             );
+      }
+
       if (u.step === "ASK_CONSENT") {
              return (
                 header(null, null) +
@@ -559,13 +557,81 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
              );
       }
 
-      // 4. Novo usuário (ou estado perdido) -> Manda o Onboarding
       if (u.step === "NEW") {
-         setUser(jid, { step: "ASK_CONSENT", temp: {} });
+         setUser(userKey, { step: "ASK_CONSENT", temp: {} });
          return ONBOARDING;
       }
 
-      // fallback enquanto não cadastrado
+      if (u.step === "ASK_DIAS_REG") {
+        const dias = parseDiasLista(text);
+        if (!dias.length) {
+          return (
+            header(null, null) +
+            "Não entendi os dias.\n\n" +
+            "Exemplos válidos: *seg, qua, sex* ou *segunda, terça, quinta*."
+          );
+        }
+
+        const pront = u.temp?.prontuario;
+        if (!pront) {
+          // Se perdeu o prontuário da memória, recomeça
+          setUser(userKey, { step: "NEW", temp: {} });
+          return ONBOARDING;
+        }
+
+        const res = await withConn(async c => {
+          // Aqui passamos o userKey (que é o número) para salvar no banco
+          const vinculo = await ensureAlunoContato(c, { prontuario: pront, telefone: phone });
+          if (!vinculo.ok) return vinculo;
+          await setPreferenciasDias(c, vinculo.alunoId, dias);
+          await setAtivo(c, vinculo.alunoId, true);
+          return vinculo;
+        });
+
+        if (!res.ok) {
+          if (res.reason === "NAO_TURMA") {
+            return (
+              header(null, null) +
+              "*Prontuário não encontrado na turma do piloto.*\n\n" +
+              "Este teste está habilitado só para o *2º ano de Redes*.\n" +
+              "Confere se você digitou o código igual ao do SUAP."
+            );
+          }
+          if (res.reason === "JA_VINCULADO") {
+            return (
+              header(null, null) +
+              "*Esse prontuário já foi cadastrado antes.*\n\n" +
+              "Ele já está vinculado a outro número de WhatsApp.\n" +
+              "Se isso estiver errado, procure a CAE ou o responsável pelo projeto."
+            );
+          }
+          return (
+             header(null, null) +
+             "Tive um problema ao salvar seu cadastro.\n" +
+             "Tenta novamente mais tarde ou fala com o responsável pelo projeto."
+           );
+        }
+
+        const alunoBanco = {
+          nome: res.aluno?.nome,
+          prontuario: res.aluno?.prontuario,
+          ativo: true
+        };
+
+        setUser(userKey, { step: "MAIN", temp: {}, aluno_id: res.alunoId });
+
+        return (
+          header(alunoBanco, null) +
+          "*Cadastro concluído no sistema automático de pedidos (piloto 2º ano Redes).* \n\n" +
+          `Dias preferidos registrados: *${diasHumanos(dias)}*.\n\n` +
+          "A partir de agora, você pode:\n" +
+          "• Enviar *Cancelar* para mandar um e-mail de cancelamento de almoço.\n" +
+          "• Enviar *Preferência* para alterar os dias.\n" +
+          "• Enviar *Bloquear* para registrar pratos que não come.\n\n" +
+          "Envie *Ajuda* para ver o menu completo."
+        );
+      }
+
       return ONBOARDING;
     }
 
@@ -582,7 +648,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         );
       }
       await withConn(c => setPreferenciasDias(c, alunoAtual.id, dias));
-      setUser(jid, { step: "MAIN", temp: {} });
+      setUser(userKey, { step: "MAIN", temp: {} });
       return (
         header(alunoAtual, ultimoPedido) +
         "*Preferências de dias atualizadas!*\n\n" +
@@ -602,7 +668,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         );
       }
       await withConn(c => addBloqueios(c, alunoAtual.id, itens));
-      setUser(jid, { step: "MAIN", temp: {} });
+      setUser(userKey, { step: "MAIN", temp: {} });
       return (
         header(alunoAtual, ultimoPedido) +
         "*Bloqueios salvos!*\n\n" +
@@ -618,7 +684,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
       const alvoIso = isoDateUTC(d);
 
-      // se já cancelou esse dia antes, não manda outro e-mail
       if (["sim", "s", "ok", "yes", "confirmar", "confirmo"].includes(n)) {
         if (u.lastCancelDate === alvoIso) {
           return (
@@ -643,7 +708,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           );
         }
 
-        setUser(jid, { step: "MAIN", temp: {}, lastCancelDate: alvoIso });
+        setUser(userKey, { step: "MAIN", temp: {}, lastCancelDate: alvoIso });
 
         return (
           header(alunoAtual, ultimoPedido) +
@@ -656,7 +721,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       }
 
       if (["nao", "não", "n", "cancelar", "voltar", "parar"].includes(n)) {
-        setUser(jid, { step: "MAIN", temp: {} });
+        setUser(userKey, { step: "MAIN", temp: {} });
         return (
           header(alunoAtual, ultimoPedido) +
           "Beleza, não vou registrar nenhum cancelamento agora.\n\n" +
@@ -665,7 +730,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         );
       }
 
-      // se mandou algo aleatório, repete a confirmação
       return (
         header(alunoAtual, ultimoPedido) +
         "Só pra confirmar:\n\n" +
@@ -687,7 +751,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
       const alvoIso = isoDateUTC(alvoDate);
 
-      // se já cancelou esse alvo, nem entra em confirmação
       if (u.lastCancelDate === alvoIso) {
         return (
           header(alunoAtual, ultimoPedido) +
@@ -698,7 +761,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         );
       }
 
-      setUser(jid, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate } });
+      setUser(userKey, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate } });
 
       return (
         header(alunoAtual, ultimoPedido) +
@@ -718,7 +781,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       n === "dia" ||
       n === "dias"
     ) {
-      setUser(jid, { step: "SET_DIAS", temp: {} });
+      setUser(userKey, { step: "SET_DIAS", temp: {} });
       return (
         header(alunoAtual, ultimoPedido) +
         "Atualizar dias em que você costuma almoçar\n\n" +
@@ -733,7 +796,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       n.includes("não como") ||
       n.includes("alergia")
     ) {
-      setUser(jid, { step: "SET_BLOQ", temp: {} });
+      setUser(userKey, { step: "SET_BLOQ", temp: {} });
       return (
         header(alunoAtual, ultimoPedido) +
         "Bloquear pratos no sistema\n\n" +
@@ -770,7 +833,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       );
     }
 
-    // fallback padrão
     return (
       header(alunoAtual, ultimoPedido) +
       "Não entendi sua mensagem.\n\n" +
