@@ -1,4 +1,3 @@
-// whatsapp/chatbot/conversa_zap.js
 import express from "express";
 import P from "pino";
 import qrcode from "qrcode-terminal";
@@ -128,17 +127,19 @@ function cleanupSock() {
     waReady = false;
 }
 
-// --- WATCHDOG ---
+// --- WATCHDOG (CORRIGIDO AQUI) ---
 const PONG_GRACE_MS = 600_000; // 10 min sem resposta = reiniciar
 const PING_EVERY_MS = 300_000; // Checa a cada 5 min
 
-setInterval(async () => {
-    const now = Date.now();
-    if (waReady && (now - lastPongAt > PONG_GRACE_MS)) {
-        logger.warn("Watchdog: Sem resposta. Reiniciando...");
-        await safeStartWA(true);
-    }
-}, PING_EVERY_MS);
+function armWaWatchdog() {
+    setInterval(async () => {
+        const now = Date.now();
+        if (waReady && (now - lastPongAt > PONG_GRACE_MS)) {
+            logger.warn("Watchdog: Sem resposta. Reiniciando...");
+            await safeStartWA(true);
+        }
+    }, PING_EVERY_MS);
+}
 
 async function safeStartWA(force = false) {
     if (startingWA) return;
@@ -304,7 +305,7 @@ app.post("/debug/force-restart", (req, res) => {
 
 // ====== BOOT ======
 (async () => {
-  armWaWatchdog();
+  armWaWatchdog(); // AGORA ESSA FUNÇÃO EXISTE!
   await safeStartWA(true);
   app.listen(PORT, () => logger.info({ PORT }, "Servidor Online"));
 })();
