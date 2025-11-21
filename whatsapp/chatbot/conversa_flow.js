@@ -62,9 +62,16 @@ function cutoff1315(dt) {
   return x;
 }
 
+// [CORREÇÃO 2] Lógica de Cancelamento Ajustada para Fim de Semana
 function diaCancelamentoAlvo(now = new Date()) {
-  // <= 13:15 → hoje; > 13:15 → amanhã
-  return (now <= cutoff1315(now)) ? now : addDays(now, 1);
+  // 1. Regra base: <= 13:15 é hoje, > 13:15 é amanhã
+  let target = (now <= cutoff1315(now)) ? now : addDays(now, 1);
+
+  // 2. Se cair Sábado (6) ou Domingo (0), avança até Segunda (1)
+  while (target.getDay() === 0 || target.getDay() === 6) {
+    target = addDays(target, 1);
+  }
+  return target;
 }
 
 // ---- helpers de data / motivo para pedidos ----
@@ -347,11 +354,13 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return rows.map(r => r.nome);
   }
 
+  // [CORREÇÃO 1] Adicionado filtro para ignorar "anteriormente" (redundância)
   async function getUltimoPedido(c, alunoId) {
     const { rows } = await c.query(
       `SELECT dia_pedido, motivo
           FROM pedido
         WHERE aluno_id = $1
+          AND motivo NOT ILIKE '%anteriormente%' 
         ORDER BY dia_pedido DESC, id DESC
         LIMIT 1`,
       [alunoId]
@@ -359,12 +368,14 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return rows[0] || null;
   }
 
+  // [CORREÇÃO 1] Adicionado filtro para ignorar "anteriormente" no histórico também
   async function getUltimosPedidos(c, alunoId) {
     const { rows } = await c.query(
       `SELECT dia_pedido, motivo
           FROM pedido
         WHERE aluno_id = $1
           AND dia_pedido >= (CURRENT_DATE - INTERVAL '7 days')
+          AND motivo NOT ILIKE '%anteriormente%'
         ORDER BY dia_pedido DESC, id DESC`,
       [alunoId]
     );
