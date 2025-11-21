@@ -4,7 +4,7 @@ apps: [
     name: "aviso_suap",
     cwd: '/app',
     script: "whatsapp/aviso_suap/avisador_suap.js",
-    autorestart: false,
+    autorestart: true,
     env: {
       PORT: 3000,
       DATA_DIR: "/app/data",
