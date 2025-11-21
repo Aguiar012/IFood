@@ -507,49 +507,57 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
     // ================= cadastro (ainda não existe no banco) =================
     if (!aluno) {
-      // fast-forward do consentimento: agora só pedimos PT (sem PT no BD)
-        
-        if (u.step === "ASK_PRONT") {
-            // remove espaços, PT no começo e tudo que não for dígito
-            let pront = strip(text)
-              .replace(/\s+/g, "")
-              .toUpperCase()
-              .replace(/^PT/, "");
-            pront = pront.replace(/\D/g, "");
-    
-            if (!/^\d{5,12}$/.test(pront)) {
-              return (
-                header(null, null) +
-                "*Formato de prontuário inválido.*\n\n" +
-                "Envie algo como *3029791*.\n" +
-                "Use o mesmo código numérico que aparece no SUAP (sem PT)."
-              );
-            }
-    
-            setUser(jid, { step: "ASK_DIAS_REG", temp: { prontuario: pront } });
-    
+      
+      if (u.step === "ASK_PRONT") {
+          // remove espaços, PT no começo e tudo que não for dígito
+          let pront = strip(text)
+            .replace(/\s+/g, "")
+            .toUpperCase()
+            .replace(/^PT/, "");
+          pront = pront.replace(/\D/g, "");
+  
+          if (!/^\d{5,12}$/.test(pront)) {
             return (
               header(null, null) +
-              "*Prontuário recebido!*\n\n" +
-              "Agora me diga em quais dias você *costuma almoçar* no câmpus.\n" +
-              "Exemplo: *seg, ter, qua, qui, sex*."
+              "*Formato de prontuário inválido.*\n\n" +
+              "Envie algo como *3029791*.\n" +
+              "Use o mesmo código numérico que aparece no SUAP (sem PT)."
             );
-        }
-    
-        if (u.step === "NEW") {
-           setUser(jid, { step: "ASK_CONSENT", temp: {} });
-           return ONBOARDING;
-        }
+          }
+  
+          setUser(jid, { step: "ASK_DIAS_REG", temp: { prontuario: pront } });
+  
+          return (
+            header(null, null) +
+            "*Prontuário recebido!*\n\n" +
+            "Agora me diga em quais dias você *costuma almoçar* no câmpus.\n" +
+            "Exemplo: *seg, ter, qua, qui, sex*."
+          );
+      }
+  
+      // [CORREÇÃO IMPORTANTE] Bloco consolidado para ASK_CONSENT
+      if (u.step === "ASK_CONSENT") {
+         if (n.includes("continuar") || n.includes("sim") || n.includes("bora")) {
+             setUser(jid, { step: "ASK_PRONT", temp: {} });
+             return (
+               header(null, null) +
+               "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
+               "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
+             );
+         } else {
+             return (
+                header(null, null) +
+                "Tranquilo, sem problemas.\n\n" +
+                "Quando você quiser usar o sistema automático de pedidos de almoço do IFSP Pirituba,\n" +
+                "basta responder *CONTINUAR*."
+             );
+         }
+      }
 
-        if (u.step === "ASK_CONSENT") {
-           // Se respondeu CONTINUAR ou similar
-           setUser(jid, { step: "ASK_PRONT", temp: {} });
-           return (
-             header(null, null) +
-             "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
-             "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
-           );
-        }
+      if (u.step === "NEW") {
+         setUser(jid, { step: "ASK_CONSENT", temp: {} });
+         return ONBOARDING;
+      }
 
       if (u.step === "ASK_DIAS_REG") {
         const dias = parseDiasLista(text);
@@ -620,16 +628,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       }
 
       // fallback enquanto não cadastrado
-      // Se não for nenhum step específico, mas mandou algo:
-      if (u.step === "ASK_CONSENT" && !n.includes("continuar")) {
-          return (
-            header(null, null) +
-            "Tranquilo, sem problemas.\n\n" +
-            "Quando você quiser usar o sistema automático de pedidos de almoço do IFSP Pirituba,\n" +
-            "basta responder *CONTINUAR*."
-          );
-      }
-
       return ONBOARDING;
     }
 
