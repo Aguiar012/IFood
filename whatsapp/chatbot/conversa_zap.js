@@ -17,7 +17,8 @@ import { createConversaFlow } from "./conversa_flow.js";
 const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
-const WA_AUTH_DIR = paths.WA_AUTH_DIR;
+// Correção: Usa a variável de ambiente se existir, senão usa o padrão do paths
+const WA_AUTH_DIR = process.env.WA_AUTH_DIR || paths.WA_AUTH_DIR;
 
 try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
@@ -123,11 +124,12 @@ async function sendWA(to, text){
 function cleanupSock() {
     try { sock?.end?.(); } catch {}
     try { sock?.ws?.close?.(); } catch {}
+    try { sock?.ev?.removeAllListeners?.(); } catch {} // Garante limpeza de eventos
     sock = null;
     waReady = false;
 }
 
-// --- WATCHDOG (CORRIGIDO AQUI) ---
+// --- WATCHDOG ---
 const PONG_GRACE_MS = 600_000; // 10 min sem resposta = reiniciar
 const PING_EVERY_MS = 300_000; // Checa a cada 5 min
 
@@ -171,6 +173,9 @@ async function startWA() {
             syncFullHistory: true, // Baixa contatos para a memória
             connectTimeoutMs: 60_000,
             printQRInTerminal: false,
+            // Retry configs para evitar timeouts de pre-keys
+            retryRequestDelayMs: 2000,
+            transactionOpts: { maxCommitRetries: 2, delayBetweenTriesMs: 2000 },
             shouldIgnoreJid: jid => {
                 const j = String(jid);
                 return (isJidGroup && isJidGroup(j)) || 
@@ -196,10 +201,16 @@ async function startWA() {
             if (connection === "close") {
                 const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
                 waReady = false;
+                
+                // Se for conflito ou logout, não tenta reconectar imediatamente da mesma forma
                 if (status === DisconnectReason.loggedOut) {
-                    try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
+                    logger.error("Desconectado (Logged Out). Limpe a sessão manualmente se necessário.");
                     cleanupSock();
-                    setTimeout(() => startWA(), 3000);
+                    // Não reinicia automaticamente para evitar loop infinito de erro
+                } else if (status === 409) { // Conflict
+                    logger.warn("Conflito de sessão detectado. Aguardando antes de reiniciar...");
+                    cleanupSock();
+                    setTimeout(() => startWA(), 10000); // Espera mais tempo
                 } else {
                     cleanupSock();
                     setTimeout(() => startWA(), 5000);
@@ -222,25 +233,21 @@ async function startWA() {
                 let jid = m.key?.remoteJid || "";
 
                 // === TENTATIVA DE TRADUÇÃO (Web -> Celular) ===
-                // Sem bloquear: Se achar, troca. Se não, usa o original.
                 if (jid.includes("@lid")) {
                     let resolved = false;
                     const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
 
-                    // 1. Se for o próprio bot
                     if (fromMe && sock.user?.id) {
                         const myJid = jidNormalizedUser ? jidNormalizedUser(sock.user.id) : sock.user.id;
                         if (!myJid.includes("@lid")) { jid = myJid; resolved = true; }
                     }
 
-                    // 2. Busca na memória (Store)
                     if (!resolved && store && store.contacts) {
                         let c = store.contacts[lidKey];
                         if (c && c.id && !c.id.includes("@lid")) { 
                             jid = c.id; 
                             resolved = true; 
                         }
-                        // Busca profunda
                         if (!resolved) {
                              const all = Object.values(store.contacts);
                              const found = all.find(ct => ct.lid === lidKey);
@@ -303,12 +310,33 @@ app.post("/debug/force-restart", (req, res) => {
     res.json({ ok: true });
 });
 
-// ====== BOOT ======
+// ====== BOOT & SHUTDOWN (CORREÇÃO FINAL) ======
+const server = app.listen(PORT, () => logger.info({ PORT }, "Servidor Online"));
+
 (async () => {
-  armWaWatchdog(); // AGORA ESSA FUNÇÃO EXISTE!
+  armWaWatchdog();
   await safeStartWA(true);
-  app.listen(PORT, () => logger.info({ PORT }, "Servidor Online"));
 })();
+
+// Função para desligar tudo corretamente e evitar conflitos
+async function gracefulShutdown(signal) {
+    logger.info(`Recebido ${signal}. Encerrando aplicação...`);
+    try { cleanupSock(); } catch {}
+    try { 
+        if (store) store.writeToFile(STORE_PATH); 
+    } catch {}
+    try { 
+        if (flow && flow.close) await flow.close(); 
+    } catch {}
+    server.close(() => {
+        logger.info("Servidor HTTP fechado.");
+        process.exit(0);
+    });
+}
+
+// Ouve os sinais de desligamento do sistema (PM2, Docker, Ctrl+C)
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
 process.on("unhandledRejection", (e) => logger.error(e));
 process.on("uncaughtException", (e) => logger.error(e));
