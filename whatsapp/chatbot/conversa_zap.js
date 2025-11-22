@@ -6,10 +6,7 @@ import fs from "fs";
 import path from "path";
 import { createRequire } from "module";
 
-// Configuração de imports compatíveis
 const require = createRequire(import.meta.url);
-
-// Imports locais
 import paths from "../paths.js";
 import { createConversaFlow } from "./conversa_flow.js";
 
@@ -17,9 +14,10 @@ import { createConversaFlow } from "./conversa_flow.js";
 const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
-// Correção: Usa a variável de ambiente se existir, senão usa o padrão do paths
-const WA_AUTH_DIR = process.env.WA_AUTH_DIR || paths.WA_AUTH_DIR;
+// Garante que usa a pasta certa
+const WA_AUTH_DIR = path.join(DATA_DIR, "wa_auth_zapbot");
 
+// Garante criação das pastas
 try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
@@ -29,11 +27,7 @@ app.use(express.json());
 
 // --- BAILEYS ---
 const baileys = require("@whiskeysockets/baileys");
-
-// Tenta pegar o construtor do socket
 const makeWASocket = baileys.default || baileys.makeWASocket || baileys;
-
-// Extrai funções
 const {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
@@ -44,38 +38,18 @@ const {
   isJidNewsletter,
   jidNormalizedUser,
   getContentType,
-  extractMessageContent,
-  Browsers
+  extractMessageContent
 } = baileys;
 
-// --- STORE (Memória) ---
+// --- STORE ---
 let store;
 const STORE_PATH = path.join(DATA_DIR, 'baileys_store_zap.json');
-
-if (typeof makeInMemoryStore === 'function') {
+try {
     store = makeInMemoryStore({ logger });
-    try {
-        if (fs.existsSync(STORE_PATH)) {
-            store.readFromFile(STORE_PATH);
-        }
-    } catch(e) { logger.warn("Store iniciada limpa."); }
-
-    setInterval(() => {
-        try { store.writeToFile(STORE_PATH); } catch {}
-    }, 10_000);
-} else {
-    // Fallback seguro
-    store = {
-        contacts: {},
-        bind: (ev) => {
-            ev.on('contacts.upsert', (u) => { 
-                for(const c of u) if(c.id) store.contacts[c.id] = Object.assign(store.contacts[c.id]||{}, c);
-            });
-            ev.on('contacts.update', (u) => { 
-                for(const c of u) if(c.id && store.contacts[c.id]) Object.assign(store.contacts[c.id], c); 
-            });
-        }
-    };
+    if (fs.existsSync(STORE_PATH)) store.readFromFile(STORE_PATH);
+    setInterval(() => { try { store.writeToFile(STORE_PATH); } catch {} }, 10_000);
+} catch(e) { 
+    logger.warn("Store iniciada em modo fallback (sem persistência)."); 
 }
 
 // --- FLUXO ---
@@ -85,12 +59,11 @@ const flow = createConversaFlow({
     logger 
 });
 
-// --- ESTADO ---
+// --- ESTADO GLOBAL ---
 let sock = null;
 let waReady = false;
 let startingWA = false;
 let lastPongAt = Date.now();
-let lastActivityAt = 0;
 globalThis.__lastQR = "";
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
@@ -105,57 +78,42 @@ async function getProxyAgent() {
     return __proxyAgent;
 }
 
-// --- UTILS ---
-const toJid = (to) => (to.endsWith("@s.whatsapp.net") || to.endsWith("@g.us")) ? to : `${to.replace(/\D/g,"")}@s.whatsapp.net`;
-
-async function sendWA(to, text){
-    if (!waReady || !sock) return null;
+// --- FUNÇÃO DE AUTO-CURA (HARD RESET) ---
+function hardResetAuth() {
+    logger.error("!!! DETECTADA CORRUPÇÃO DE SESSÃO OU LOGOUT !!!");
+    logger.error("Iniciando AUTO-CURA: Apagando pasta de autenticação e reiniciando...");
+    
     try {
-        const jid = toJid(to);
-        const sent = await sock.sendMessage(jid, { text });
-        lastActivityAt = Date.now();
-        return sent?.key?.id;
-    } catch (e) {
-        logger.error({ err: String(e) }, "Erro envio");
-        return null;
+        // Fecha conexões
+        if (sock) {
+            sock.end(undefined);
+            sock = null;
+        }
+        // Apaga a pasta corrupta
+        fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true });
+        logger.info("Pasta de autenticação apagada com sucesso.");
+    } catch (err) {
+        logger.error({ err }, "Erro ao tentar apagar pasta de autenticação.");
     }
+
+    // Mata o processo para o PM2 reiniciar limpo
+    logger.info("Encerrando processo para reinício limpo...");
+    process.exit(1); 
 }
 
+// --- LIMPEZA DE SOCKET ---
 function cleanupSock() {
-    try { sock?.end?.(); } catch {}
+    try { sock?.end?.(undefined); } catch {}
     try { sock?.ws?.close?.(); } catch {}
-    try { sock?.ev?.removeAllListeners?.(); } catch {} // Garante limpeza de eventos
+    try { sock?.ev?.removeAllListeners?.(); } catch {}
     sock = null;
     waReady = false;
 }
 
-// --- WATCHDOG ---
-const PONG_GRACE_MS = 600_000; // 10 min sem resposta = reiniciar
-const PING_EVERY_MS = 300_000; // Checa a cada 5 min
-
-function armWaWatchdog() {
-    setInterval(async () => {
-        const now = Date.now();
-        if (waReady && (now - lastPongAt > PONG_GRACE_MS)) {
-            logger.warn("Watchdog: Sem resposta. Reiniciando...");
-            await safeStartWA(true);
-        }
-    }, PING_EVERY_MS);
-}
-
-async function safeStartWA(force = false) {
+async function startWA() {
     if (startingWA) return;
     startingWA = true;
-    try { 
-        if(force) cleanupSock();
-        await startWA(); 
-    } finally { 
-        startingWA = false; 
-    }
-}
 
-// --- START WA ---
-async function startWA() {
     try {
         const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
         const { version } = await fetchLatestBaileysVersion();
@@ -167,15 +125,13 @@ async function startWA() {
             version,
             auth: state,
             logger,
-            browser: ["Ubuntu", "Chrome", "20.0.04"],
+            browser: ["Ubuntu", "Chrome", "22.0.0"], // Browser fixo ajuda na estabilidade
             agent, fetchAgent: agent,
             markOnlineOnConnect: true,
-            syncFullHistory: true, // Baixa contatos para a memória
+            syncFullHistory: false, // Desligado para evitar sobrecarga inicial
             connectTimeoutMs: 60_000,
             printQRInTerminal: false,
-            // Retry configs para evitar timeouts de pre-keys
-            retryRequestDelayMs: 2000,
-            transactionOpts: { maxCommitRetries: 2, delayBetweenTriesMs: 2000 },
+            generateHighQualityLinkPreview: true,
             shouldIgnoreJid: jid => {
                 const j = String(jid);
                 return (isJidGroup && isJidGroup(j)) || 
@@ -191,152 +147,106 @@ async function startWA() {
             if (qr) {
                 globalThis.__lastQR = qr;
                 qrcode.generate(qr, { small: true });
-                logger.info("QR Code gerado.");
+                logger.info("NOVO QR CODE GERADO - Escaneie para conectar.");
             }
+
             if (connection === "open") {
                 waReady = true;
                 lastPongAt = Date.now();
-                logger.info("✅ CONECTADO!");
+                logger.info("✅ CONECTADO COM SUCESSO!");
             }
+
             if (connection === "close") {
-                const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
-                waReady = false;
+                const error = lastDisconnect?.error;
+                const statusCode = new Boom(error)?.output?.statusCode;
                 
-                // Se for conflito ou logout, não tenta reconectar imediatamente da mesma forma
-                if (status === DisconnectReason.loggedOut) {
-                    logger.error("Desconectado (Logged Out). Limpe a sessão manualmente se necessário.");
+                waReady = false;
+                logger.warn({ statusCode, error: error?.message }, "Conexão fechada");
+
+                // --- DETECÇÃO DE SESSÃO MORTA ---
+                const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+                const isSessionError = String(error?.message).includes("SessionError") || 
+                                       String(error?.message).includes("MessageCounterError") ||
+                                       String(error?.stack).includes("Crypto");
+
+                if (isLoggedOut || isSessionError) {
+                    hardResetAuth(); // CHAMA A AUTO-CURA
+                } else if (statusCode === 409) { // Conflito
+                    logger.warn("Conflito detectado. Aguardando 10s antes de tentar reconectar...");
                     cleanupSock();
-                    // Não reinicia automaticamente para evitar loop infinito de erro
-                } else if (status === 409) { // Conflict
-                    logger.warn("Conflito de sessão detectado. Aguardando antes de reiniciar...");
-                    cleanupSock();
-                    setTimeout(() => startWA(), 10000); // Espera mais tempo
+                    setTimeout(startWA, 10000);
                 } else {
+                    // Reconexão padrão
                     cleanupSock();
-                    setTimeout(() => startWA(), 5000);
+                    setTimeout(startWA, 5000);
                 }
             }
         });
 
         sock.ws.on("pong", () => { lastPongAt = Date.now(); });
 
-        // --- MENSAGENS ---
         sock.ev.on("messages.upsert", async ({ messages, type }) => {
             if (type !== "notify" || !messages?.length) return;
-
             for (const m of messages) {
                 const msgId = m.key?.id;
-                if (!msgId || handledMessageIds.has(msgId)) continue;
+                if (handledMessageIds.has(msgId)) continue;
                 handledMessageIds.add(msgId);
 
-                const fromMe = !!m.key?.fromMe;
-                let jid = m.key?.remoteJid || "";
-
-                // === TENTATIVA DE TRADUÇÃO (Web -> Celular) ===
-                if (jid.includes("@lid")) {
-                    let resolved = false;
-                    const lidKey = jidNormalizedUser ? jidNormalizedUser(jid) : jid;
-
-                    if (fromMe && sock.user?.id) {
-                        const myJid = jidNormalizedUser ? jidNormalizedUser(sock.user.id) : sock.user.id;
-                        if (!myJid.includes("@lid")) { jid = myJid; resolved = true; }
-                    }
-
-                    if (!resolved && store && store.contacts) {
-                        let c = store.contacts[lidKey];
-                        if (c && c.id && !c.id.includes("@lid")) { 
-                            jid = c.id; 
-                            resolved = true; 
-                        }
-                        if (!resolved) {
-                             const all = Object.values(store.contacts);
-                             const found = all.find(ct => ct.lid === lidKey);
-                             if (found && found.id && !found.id.includes("@lid")) {
-                                 jid = found.id;
-                                 resolved = true;
-                             }
-                        }
-                    }
-                }
-
-                if (jidNormalizedUser) jid = jidNormalizedUser(jid);
-                if (!jid || jid.endsWith("@status")) continue;
-
-                const ct = getContentType ? getContentType(m.message) : Object.keys(m.message)[0];
-                logger.info({ jid, ct }, "Msg RX");
-
-                if (fromMe) continue;
+                if (m.key?.fromMe) continue;
+                
+                // Tratamento simplificado de JID para evitar erros
+                const jid = m.key?.remoteJid;
+                if (!jid || jid.includes("status")) continue;
 
                 const content = extractMessageContent ? extractMessageContent(m.message) : m.message;
                 const text = content?.conversation || content?.extendedTextMessage?.text || "";
-
                 if (!text) continue;
 
+                // Marca como lida para evitar acumular
                 try { await sock.readMessages([m.key]); } catch {}
-                
-                // === FLUXO ===
-                let reply = "";
-                try { 
-                    reply = await flow.handleText(jid, text); 
-                } catch (e) { 
-                    logger.error(e, "Erro no fluxo"); 
-                }
-                
-                if (reply && sock && waReady) {
-                    await sock.sendMessage(jid, { text: reply });
-                    lastActivityAt = Date.now();
+
+                try {
+                    const reply = await flow.handleText(jid, text);
+                    if (reply && waReady && sock) {
+                        await sock.sendMessage(jid, { text: reply });
+                    }
+                } catch (e) {
+                    logger.error(e, "Erro no fluxo de conversa");
                 }
             }
         });
 
     } catch (e) {
-        logger.error(e, "Erro fatal no startWA");
-        setTimeout(() => startWA(), 10000);
+        logger.error(e, "Erro fatal ao iniciar WA");
+        // Se der erro fatal na inicialização (ex: corrupto), reseta tbm
+        if(String(e).includes("Corrupt") || String(e).includes("Unexpected end")) {
+            hardResetAuth();
+        } else {
+            setTimeout(() => { startingWA = false; startWA(); }, 5000);
+        }
     } finally {
         startingWA = false;
     }
 }
 
-// ====== ROTAS ======
-app.get("/", (req, res) => res.send("ok"));
+// --- SERVER ---
+app.get("/", (req, res) => res.send("Bot Online"));
 app.get("/qr", (req, res) => {
-    const qr = globalThis.__lastQR;
-    if (!qr) return res.send("Aguarde...");
-    res.send(`<div id="qrcode"></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><script>new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(qr)}, width: 300, height: 300 });</script>`);
+    if (!globalThis.__lastQR) return res.send("Aguarde o QR Code...");
+    res.send(`<div id="qrcode"></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><script>new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(globalThis.__lastQR)}, width: 300, height: 300 });</script>`);
 });
-app.post("/debug/force-restart", (req, res) => {
+
+const server = app.listen(PORT, () => {
+    logger.info({ PORT }, "Servidor HTTP rodando.");
+    startWA();
+});
+
+// --- GRACEFUL SHUTDOWN ---
+async function shutdown() {
+    logger.info("Desligando...");
     cleanupSock();
-    setTimeout(() => startWA(), 1000);
-    res.json({ ok: true });
-});
-
-// ====== BOOT & SHUTDOWN (CORREÇÃO FINAL) ======
-const server = app.listen(PORT, () => logger.info({ PORT }, "Servidor Online"));
-
-(async () => {
-  armWaWatchdog();
-  await safeStartWA(true);
-})();
-
-// Função para desligar tudo corretamente e evitar conflitos
-async function gracefulShutdown(signal) {
-    logger.info(`Recebido ${signal}. Encerrando aplicação...`);
-    try { cleanupSock(); } catch {}
-    try { 
-        if (store) store.writeToFile(STORE_PATH); 
-    } catch {}
-    try { 
-        if (flow && flow.close) await flow.close(); 
-    } catch {}
-    server.close(() => {
-        logger.info("Servidor HTTP fechado.");
-        process.exit(0);
-    });
+    server.close();
+    process.exit(0);
 }
-
-// Ouve os sinais de desligamento do sistema (PM2, Docker, Ctrl+C)
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-
-process.on("unhandledRejection", (e) => logger.error(e));
-process.on("uncaughtException", (e) => logger.error(e));
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
