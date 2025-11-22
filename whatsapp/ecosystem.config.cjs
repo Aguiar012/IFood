@@ -29,6 +29,7 @@ apps: [
         WA_AUTH_DIR: "/app/data/wa_auth_zapbot",
         // Força node a não rejeitar certificados antigos se houver proxy
         NODE_TLS_REJECT_UNAUTHORIZED: "0" 
+      }
   }
 ]
 
