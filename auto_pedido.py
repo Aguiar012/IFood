@@ -8,7 +8,6 @@ import psycopg
 
 # === Config geral ===
 URL_HOME    = 'http://200.133.203.133/home'
-ARQUIVO     = 'redes.json'
 JITTER_MAX  = 120
 TENTATIVAS  = 2
 RETRY_SEC   = 30
@@ -20,8 +19,9 @@ SMTP_SERVER  = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT    = int(os.getenv('SMTP_PORT', 587))
 TO_ADDRESS   = os.getenv('TO_ADDRESS')
 
-# Garante que admins está definido para evitar erros
-ADMINS_E164  = os.getenv('ADMINS_E164', '')
+# Configuração do Bot de Alerta
+BOT_URL      = os.getenv('BOT_URL') # URL do seu bot no Northflank + /send-message
+ADMINS_E164  = os.getenv('ADMINS_E164', '') # Lista de números separados por vírgula
 
 DATABASE_URL = os.getenv('DATABASE_URL')
 
@@ -37,23 +37,13 @@ logging.basicConfig(format='%(asctime)s %(levelname)s: %(message)s',
 WEEKDAY_PT = {1:'seg',2:'ter',3:'qua',4:'qui',5:'sex',6:'sab',7:'dom'}
 
 def compute_target_date(now: datetime | None = None):
-    """
-    Regra para o PEDIDO (mantida a lógica original para o fluxo de pedir):
-    - Antes de 13:15 -> D+1
-    - Depois de 13:15 -> D+2
-    - Se cair em sábado ou domingo, empurra até segunda.
-    """
     if now is None:
         now = datetime.now(TZ)
-
     cutoff = now.replace(hour=CUTOFF_HOUR, minute=CUTOFF_MIN, second=0, microsecond=0)
     days_ahead = 1 if now < cutoff else 2
-
     target = (now + timedelta(days=days_ahead)).date()
-
     while target.isoweekday() in (6, 7):
         target += timedelta(days=1)
-
     return target
 
 # --------------------------- E-mail --------------------------------
@@ -70,6 +60,28 @@ def send_email(subject: str, body: str):
             smtp.send_message(msg)
     except Exception as e:
         logging.error(f"Falha ao enviar email: {e}")
+
+# --------------------------- WhatsApp (Seu Bot) ---------------------
+def notify_admins(message):
+    """Envia mensagem para os admins via API do seu bot"""
+    if not BOT_URL or not ADMINS_E164:
+        logging.warning("BOT_URL ou ADMINS_E164 não configurados. Pulei o alerta.")
+        return
+
+    admins = [a.strip() for a in ADMINS_E164.split(',') if a.strip()]
+    
+    for admin in admins:
+        try:
+            payload = {
+                "number": admin,
+                "message": message
+            }
+            # Timeout curto para não travar o script se o bot estiver offline
+            r = requests.post(BOT_URL, json=payload, timeout=10)
+            if r.status_code != 200:
+                logging.error(f"Erro ao notificar {admin}: {r.text}")
+        except Exception as e:
+            logging.error(f"Falha de conexão ao notificar {admin}: {e}")
 
 # --------------------------- Dados ---------------------------------
 def load_alunos_para_dia(target_dow: int):
@@ -89,7 +101,6 @@ def load_alunos_para_dia(target_dow: int):
             for (aluno_id, prontuario) in cur.fetchall():
                 out.append({'id': aluno_id, 'prontuario': prontuario})
     return out
-
 
 def get_bloqueios_por_prontuario(pront: str) -> list[str]:
     if not DATABASE_URL:
@@ -120,33 +131,19 @@ def registrar_pedido(aluno_id: int, dia_pedido, motivo: str):
             )
         conn.commit()
 
-# === NOVA FUNÇÃO: ATUALIZAR PRÓXIMO PRATO ===
+# === FUNÇÃO: ATUALIZAR PRÓXIMO PRATO ===
 def atualizar_proximo_prato(sess):
-    """
-    Lógica de extração:
-    1. Define data alvo (Hoje < 13:15, Amanhã > 13:15, Sexta tarde/FDS -> Segunda).
-    2. Varre o HTML procurando o bloco correspondente à data alvo.
-    3. Se encontrar 'não cadastrado', salva isso.
-    4. Se encontrar 'Prato Principal', extrai apenas a 'Opção 1'.
-    5. Salva na tabela proximo_prato.
-    """
     if not DATABASE_URL:
         return "(banco off)"
 
     now = datetime.now(TZ)
     cutoff = now.replace(hour=CUTOFF_HOUR, minute=CUTOFF_MIN, second=0, microsecond=0)
 
-    # Regra de Horário e Dias:
     if now <= cutoff:
-        # Antes das 13:15: Queremos o almoço de HOJE
         target_date = now.date()
     else:
-        # Depois das 13:15: Queremos o almoço de AMANHÃ
         target_date = (now + timedelta(days=1)).date()
 
-    # Ajuste Fim de Semana:
-    # Se o alvo cair Sábado (6) ou Domingo (7), joga para Segunda.
-    # Ex: Sexta 14:00 -> Alvo inicial Sábado -> Corrige para Segunda.
     while target_date.isoweekday() in (6, 7):
         target_date += timedelta(days=1)
 
@@ -164,22 +161,15 @@ def atualizar_proximo_prato(sess):
             'Julho': 7, 'Agosto': 8, 'Setembro': 9, 'Outubro': 10, 'Novembro': 11, 'Dezembro': 12
         }
 
-        # O site usa "jumbotron" para o dia atual e "jumbotron sub" para os próximos.
-        # Pegamos todos para procurar a data correta.
         all_jumbotrons = soup.select('.jumbotron')
-
         target_container = None
 
-        # 1. Encontrar o container da Data Alvo
         for jumbo in all_jumbotrons:
             title_tag = jumbo.find('h2', class_='display-3')
             if not title_tag:
                 continue
-            
             txt = title_tag.get_text(" ", strip=True)
-            # Ex: "Cardápio - 24 de Novembro de 2025" ou "25 de Novembro de 2025"
             match = re.search(r'(\d{1,2})\s+de\s+([A-Za-zçÇ]+)\s+de\s+(\d{4})', txt, re.IGNORECASE)
-            
             if match:
                 d, m_name, y = match.groups()
                 m = meses.get(m_name.capitalize())
@@ -189,36 +179,26 @@ def atualizar_proximo_prato(sess):
                         target_container = jumbo
                         break
         
-        # 2. Extrair a Opção 1 desse container
         if target_container:
             container_text = target_container.get_text(" ", strip=True)
-            
-            # Caso 1: Cardápio não cadastrado (caixa vermelha)
             if "não cadastrado" in container_text.lower():
                 prato_encontrado = "Cardápio não cadastrado"
             else:
-                # Caso 2: Tenta achar "Prato Principal: Opção 1: XXXXX Opção 2:"
-                # O find_all('p') ajuda a isolar linhas
                 paragraphs = target_container.find_all('p')
                 for p in paragraphs:
                     p_text = p.get_text(" ", strip=True)
                     if "Prato Principal" in p_text:
-                        # Regex para pegar tudo entre "Opção 1:" e "Opção 2:" (ou fim da linha)
-                        # Ignora case, pega o grupo 1
                         match_prato = re.search(r'Opção 1:\s*(.*?)(?:\s+Opção 2:|$)', p_text, re.IGNORECASE)
                         if match_prato:
                             prato_encontrado = match_prato.group(1).strip()
                         else:
-                            # Fallback: se não achar o padrão exato, pega o texto todo do paragrafo
                             prato_encontrado = p_text.replace("Prato Principal:", "").strip()
                         break
-                
                 if not prato_encontrado:
                     prato_encontrado = "Prato não identificado no texto"
         else:
             prato_encontrado = "Data não encontrada no site"
 
-        # 3. Salvar no Banco (Upsert)
         logging.info(f"Salvando no banco -> Data: {target_date} | Prato: {prato_encontrado}")
         
         with psycopg.connect(DATABASE_URL) as conn:
@@ -236,7 +216,6 @@ def atualizar_proximo_prato(sess):
     except Exception as e:
         logging.error(f"Erro ao atualizar cardápio: {e}")
         return "(erro na atualização)"
-
 
 # --------------------- HTTP / parsing do site ----------------------
 def get_csrf_token(sess):
@@ -268,8 +247,7 @@ def parse_feedback(html: str):
 
 # ----------------- Normalização & preferências ---------------------
 def _norm(txt: str) -> str:
-    if not txt:
-        return ""
+    if not txt: return ""
     t = unicodedata.normalize('NFKD', txt)
     t = ''.join(ch for ch in t if not unicodedata.combining(ch))
     return t.lower()
@@ -284,17 +262,10 @@ def should_skip(prato_texto: str, bloqueios: list[str]) -> tuple[bool, str]:
     return (len(hits) > 0, ", ".join(hits))
 
 # ------------------- Erros irrelevantes p/ alerta ------------------
-IGNORE_PATTERNS = [
-    r'Gerado anteriormente',
-    r'Ticket Gerado',
-    r'PULOU_PREF',
-    r'Pulou por prefer.ncia',
-    r'SKIP_DIA',
-]
+IGNORE_PATTERNS = [r'Gerado anteriormente', r'Ticket Gerado', r'PULOU_PREF', r'Pulou por prefer.ncia', r'SKIP_DIA']
 
 def is_relevant_error(msg: str) -> bool:
-    if not msg:
-        return False
+    if not msg: return False
     for pat in IGNORE_PATTERNS:
         if re.search(pat, msg, re.IGNORECASE):
             return False
@@ -305,12 +276,7 @@ def main():
     now = datetime.now(TZ)
     sess = requests.Session()
 
-    # 1. Atualiza a tabela proximo_prato com a Opção 1 da data correta
     prato_do_dia_texto = atualizar_proximo_prato(sess)
-    
-    # 2. Lógica de Pedidos (Target Date pode diferir dependendo da hora que o script roda)
-    # O script de pedido geralmente roda em horarios especificos, mas usamos a mesma logica base
-    # Se o prato salvo for "não cadastrado", ele vai tentar pedir mas deve cair no bloqueio se você tiver bloqueio de nome vazio, ou segue normal.
     
     target_date_pedido = compute_target_date(now)
     target_dow  = target_date_pedido.isoweekday()
@@ -325,7 +291,6 @@ def main():
         aluno_id = aluno['id']
         pront    = aluno['prontuario']
         
-        # Checa bloqueios usando o texto extraído (Opção 1)
         bloqueios = get_bloqueios_por_prontuario(pront)
         skip, hits = should_skip(prato_do_dia_texto, bloqueios)
         
@@ -333,13 +298,11 @@ def main():
             inicio = datetime.now(TZ).strftime('%H:%M:%S')
             time.sleep(random.randint(0, JITTER_MAX))
             fim = datetime.now(TZ).strftime('%H:%M:%S')
-        
             motivo = f'NAO_PEDIU: prato contém bloqueios -> {hits}'
             registrar_pedido(aluno_id, target_date_pedido, motivo)
             detalhes.append((pront, True, motivo, inicio, fim, 0))
             continue
 
-        # Faz o pedido
         time.sleep(random.randint(0, JITTER_MAX))
         inicio = datetime.now(TZ).strftime('%H:%M:%S')
         
@@ -349,8 +312,7 @@ def main():
             try:
                 r = enviar_prontuario(sess, pront)
                 sucesso, mensagem = parse_feedback(r.text)
-                if sucesso:
-                    break
+                if sucesso: break
                 raise ValueError(mensagem)
             except Exception as e:
                 mensagem = str(e)
@@ -366,7 +328,7 @@ def main():
         
         registrar_pedido(aluno_id, target_date_pedido, motivo)
 
-    # Relatório E-mail
+    # E-mail
     linhas = ['Relatório Auto-Almoço — ' + now.strftime('%d/%m/%Y')]
     linhas.append(f'Data-alvo: {target_date_pedido.strftime("%d/%m/%Y")} ({WEEKDAY_PT[target_dow]})')
     ok_total = sum(1 for _, s, *_ in detalhes if s)
@@ -377,6 +339,21 @@ def main():
         status = 'OK ' if ok else 'FALHOU'
         linhas.append(f'{pront} | {status} | {ini}→{fim} | {tent} | {msg}')
     send_email('Relatório Auto-Almoço', '\n'.join(linhas))
+
+    # Alerta Admins via WhatsApp Próprio (Novo)
+    erros = [(p, m) for (p, ok, m, *_ ) in detalhes if (not ok) and is_relevant_error(m)]
+    if erros and ADMINS_E164 and BOT_URL:
+        corpo = []
+        corpo.append('🚨 *Falhas no Auto-Almoço:*')
+        corpo.append(now.strftime('%d/%m %H:%M'))
+        corpo.append(f'Prato: {prato_do_dia_texto}')
+        corpo.append('')
+        for i, (pront, msg) in enumerate(erros[:20], start=1):
+            corpo.append(f'{i}. {pront}: {msg}')
+        if len(erros) > 20:
+            corpo.append(f'... (+{len(erros)-20} falhas)')
+        
+        notify_admins('\n'.join(corpo))
 
 if __name__ == '__main__':
     main()
