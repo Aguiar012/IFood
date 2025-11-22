@@ -15,16 +15,20 @@ apps: [
     }
   },
   {
-    name: "conversazap",
-    cwd: '/app',
-    script: "whatsapp/chatbot/conversa_zap.js",
-    autorestart: false,
-    env: {
-      PORT: 3001,
-      DATA_DIR: "/app/data",
-      WA_AUTH_DIR: "/app/data/wa_auth_zapbot",
-      LOCK_FILE: "/app/data/locks/conversazap.lock.json"
-    }
+      name: "conversazap",
+      cwd: '/app',
+      script: "whatsapp/chatbot/conversa_zap.js",
+      autorestart: true,
+      // Configurações importantes para estabilidade:
+      max_memory_restart: '400M', // Reinicia se vazar memória
+      exp_backoff_restart_delay: 100, // Espera um pouco mais a cada erro
+      env: {
+        // ... seus envs ...
+        PORT: 3001,
+        DATA_DIR: "/app/data",
+        WA_AUTH_DIR: "/app/data/wa_auth_zapbot",
+        // Força node a não rejeitar certificados antigos se houver proxy
+        NODE_TLS_REJECT_UNAUTHORIZED: "0" 
   }
 ]
 
