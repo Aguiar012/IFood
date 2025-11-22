@@ -20,7 +20,7 @@ try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
 const logger = P({ level: "info" });
 const app = express();
-app.use(express.json());
+app.use(express.json()); // Necessário para receber JSON na API
 
 // --- BAILEYS ---
 const baileys = require("@whiskeysockets/baileys");
@@ -52,6 +52,7 @@ const flow = createConversaFlow({
 });
 
 let sock = null;
+let waReady = false; // Flag para saber se pode enviar msg
 globalThis.__lastQR = "";
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
@@ -81,7 +82,6 @@ async function startWA() {
             browser: ["Ubuntu", "Chrome", "22.0.0"],
             agent, 
             fetchAgent: agent,
-            // Aumenta timeouts para redes instáveis
             connectTimeoutMs: 60_000,
             keepAliveIntervalMs: 15_000,
             defaultQueryTimeoutMs: 60_000,
@@ -103,23 +103,22 @@ async function startWA() {
 
             if (connection === "open") {
                 logger.info("✅ CONECTADO!");
+                waReady = true;
                 globalThis.__lastQR = "";
             }
 
             if (connection === "close") {
+                waReady = false;
                 const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
                 const reason = lastDisconnect?.error?.output?.payload?.error || lastDisconnect?.error?.message;
                 
                 logger.warn(`Conexão caiu: ${status} - ${reason}`);
 
-                // LÓGICA DE RECONEXÃO "TEIMOSA"
-                // Só desiste se for Logout (401). Todo o resto (408, 428, 500, QR refs ended) a gente tenta de novo.
                 if (status === DisconnectReason.loggedOut) {
-                    logger.error("Logout detectado. Apagando sessão para permitir novo login.");
+                    logger.error("Logout detectado. Apagando sessão...");
                     try { fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true }); } catch {}
                     startWA(); 
                 } else {
-                    // Espera um pouco e tenta reconectar
                     logger.info("Reconectando em 3s...");
                     setTimeout(startWA, 3000);
                 }
@@ -156,12 +155,39 @@ async function startWA() {
 
     } catch (err) {
         logger.error(`Erro fatal no startWA: ${err}`);
-        // Se der erro no início (ex: QR refs ended), tenta de novo
         setTimeout(startWA, 3000);
     }
 }
 
-// --- SERVER ---
+// --- API PARA ENVIAR MENSAGEM (USADO PELO GITHUB ACTIONS) ---
+app.post("/send-message", async (req, res) => {
+    try {
+        const { number, message } = req.body;
+        if (!number || !message) {
+            return res.status(400).json({ error: "Faltou 'number' ou 'message' no corpo do JSON" });
+        }
+
+        if (!waReady || !sock) {
+            return res.status(503).json({ error: "Bot ainda não está conectado ao WhatsApp" });
+        }
+
+        // Formata número (aceita apenas números, adiciona sufixo)
+        // Se vier com @s.whatsapp.net, usa direto. Se não, limpa e monta.
+        const jid = number.includes("@") 
+            ? number 
+            : `${number.replace(/\D/g, "")}@s.whatsapp.net`;
+
+        await sock.sendMessage(jid, { text: message });
+        logger.info(`Mensagem API enviada para ${jid}`);
+        
+        return res.json({ ok: true });
+    } catch (e) {
+        logger.error("Erro no endpoint /send-message: " + e);
+        return res.status(500).json({ error: String(e) });
+    }
+});
+
+// --- OUTRAS ROTAS ---
 app.get("/", (req, res) => res.send("ok"));
 app.get("/qr", (req, res) => {
     if (!globalThis.__lastQR) return res.send("<h3>Aguardando/Conectado...</h3>");
