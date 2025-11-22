@@ -14,18 +14,17 @@ import { createConversaFlow } from "./conversa_flow.js";
 const PORT = Number(process.env.PORT) || (paths.APP_KEY.includes("conversa") ? 3001 : 3000);
 const PROXY_URL = process.env.PROXY_URL || "";
 const DATA_DIR = process.env.DATA_DIR || "/app/data";
-// Garante que usa a pasta certa
-const WA_AUTH_DIR = path.join(DATA_DIR, "wa_auth_zapbot");
+const WA_AUTH_DIR = process.env.WA_AUTH_DIR || paths.WA_AUTH_DIR;
 
-// Garante criação das pastas
+// Garante pastas
 try { fs.mkdirSync(WA_AUTH_DIR, { recursive: true }); } catch {}
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
 
-const logger = P({ level: process.env.LOG_LEVEL || "info" });
+const logger = P({ level: "info" }); // Nível simplificado para reduzir ruído
 const app = express();
 app.use(express.json());
 
-// --- BAILEYS ---
+// --- BAILEYS IMPORTS ---
 const baileys = require("@whiskeysockets/baileys");
 const makeWASocket = baileys.default || baileys.makeWASocket || baileys;
 const {
@@ -48,9 +47,7 @@ try {
     store = makeInMemoryStore({ logger });
     if (fs.existsSync(STORE_PATH)) store.readFromFile(STORE_PATH);
     setInterval(() => { try { store.writeToFile(STORE_PATH); } catch {} }, 10_000);
-} catch(e) { 
-    logger.warn("Store iniciada em modo fallback (sem persistência)."); 
-}
+} catch (e) { logger.warn("Store falhou ao iniciar, seguindo sem persistência de contatos."); }
 
 // --- FLUXO ---
 const flow = createConversaFlow({ 
@@ -61,55 +58,36 @@ const flow = createConversaFlow({
 
 // --- ESTADO GLOBAL ---
 let sock = null;
-let waReady = false;
 let startingWA = false;
-let lastPongAt = Date.now();
+let waReady = false;
+let reconnectAttempts = 0;
 globalThis.__lastQR = "";
+
+// Lock para evitar duplicidade de mensagens
 const handledMessageIds = new Set();
 setInterval(() => handledMessageIds.clear(), 60_000);
 
-// --- PROXY ---
-let __proxyAgent;
-async function getProxyAgent() {
-    if (!PROXY_URL) return undefined;
-    if (__proxyAgent) return __proxyAgent;
-    const { HttpsProxyAgent } = await import("https-proxy-agent");
-    __proxyAgent = new HttpsProxyAgent(PROXY_URL);
-    return __proxyAgent;
-}
-
-// --- FUNÇÃO DE AUTO-CURA (HARD RESET) ---
-function hardResetAuth() {
-    logger.error("!!! DETECTADA CORRUPÇÃO DE SESSÃO OU LOGOUT !!!");
-    logger.error("Iniciando AUTO-CURA: Apagando pasta de autenticação e reiniciando...");
-    
+// --- FUNÇÕES DE LIMPEZA ---
+function nukeSession() {
+    logger.error("!!! SESSÃO CORROMPIDA DETECTADA. APAGANDO DADOS DE AUTH !!!");
     try {
-        // Fecha conexões
-        if (sock) {
-            sock.end(undefined);
-            sock = null;
-        }
-        // Apaga a pasta corrupta
+        sock?.end?.();
+        sock = null;
         fs.rmSync(WA_AUTH_DIR, { recursive: true, force: true });
-        logger.info("Pasta de autenticação apagada com sucesso.");
-    } catch (err) {
-        logger.error({ err }, "Erro ao tentar apagar pasta de autenticação.");
+        logger.info("Pasta de autenticação removida. Reiniciando para gerar novo QR...");
+    } catch (e) {
+        logger.error({ err: String(e) }, "Erro ao limpar sessão");
     }
-
-    // Mata o processo para o PM2 reiniciar limpo
-    logger.info("Encerrando processo para reinício limpo...");
-    process.exit(1); 
 }
 
-// --- LIMPEZA DE SOCKET ---
 function cleanupSock() {
-    try { sock?.end?.(undefined); } catch {}
+    try { sock?.end?.(); } catch {}
     try { sock?.ws?.close?.(); } catch {}
-    try { sock?.ev?.removeAllListeners?.(); } catch {}
     sock = null;
     waReady = false;
 }
 
+// --- START WA ---
 async function startWA() {
     if (startingWA) return;
     startingWA = true;
@@ -117,7 +95,13 @@ async function startWA() {
     try {
         const { state, saveCreds } = await useMultiFileAuthState(WA_AUTH_DIR);
         const { version } = await fetchLatestBaileysVersion();
-        const agent = await getProxyAgent();
+        
+        // Configura Proxy se existir
+        let agent;
+        if (PROXY_URL) {
+            const { HttpsProxyAgent } = await import("https-proxy-agent");
+            agent = new HttpsProxyAgent(PROXY_URL);
+        }
 
         logger.info(`Iniciando Socket v${version.join('.')}`);
 
@@ -125,128 +109,143 @@ async function startWA() {
             version,
             auth: state,
             logger,
-            browser: ["Ubuntu", "Chrome", "22.0.0"], // Browser fixo ajuda na estabilidade
-            agent, fetchAgent: agent,
-            markOnlineOnConnect: true,
-            syncFullHistory: false, // Desligado para evitar sobrecarga inicial
+            printQRInTerminal: true, // Útil para ver no log do Northflank
+            browser: ["Ubuntu", "Chrome", "22.0.0"], // Navegador fixo ajuda a manter sessão
+            agent, 
+            fetchAgent: agent,
             connectTimeoutMs: 60_000,
-            printQRInTerminal: false,
-            generateHighQualityLinkPreview: true,
+            keepAliveIntervalMs: 10_000,
+            retryRequestDelayMs: 5000,
+            syncFullHistory: false, // Desativar para evitar sobrecarga inicial e timeouts
+            generateHighQualityLinkPreview: false,
             shouldIgnoreJid: jid => {
-                const j = String(jid);
-                return (isJidGroup && isJidGroup(j)) || 
-                       (isJidBroadcast && isJidBroadcast(j)) || 
-                       (isJidNewsletter && isJidNewsletter(j));
+                 const j = String(jid);
+                 return isJidBroadcast(j) || isJidNewsletter(j);
             }
         });
 
-        if (store && store.bind) store.bind(sock.ev);
+        if (store) store.bind(sock.ev);
+
+        // --- EVENTOS DE CONEXÃO ---
         sock.ev.on("creds.update", saveCreds);
 
-        sock.ev.on("connection.update", ({ connection, lastDisconnect, qr }) => {
+        sock.ev.on("connection.update", async (update) => {
+            const { connection, lastDisconnect, qr } = update;
+
             if (qr) {
                 globalThis.__lastQR = qr;
-                qrcode.generate(qr, { small: true });
-                logger.info("NOVO QR CODE GERADO - Escaneie para conectar.");
+                logger.info("Novo QR Code gerado. Escaneie agora.");
+                reconnectAttempts = 0;
             }
 
             if (connection === "open") {
                 waReady = true;
-                lastPongAt = Date.now();
-                logger.info("✅ CONECTADO COM SUCESSO!");
+                reconnectAttempts = 0;
+                logger.info("✅ CONECTADO E PRONTO!");
             }
 
             if (connection === "close") {
-                const error = lastDisconnect?.error;
-                const statusCode = new Boom(error)?.output?.statusCode;
-                
                 waReady = false;
-                logger.warn({ statusCode, error: error?.message }, "Conexão fechada");
+                const status = new Boom(lastDisconnect?.error)?.output?.statusCode;
+                const errMessage = String(lastDisconnect?.error || "");
 
-                // --- DETECÇÃO DE SESSÃO MORTA ---
-                const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-                const isSessionError = String(error?.message).includes("SessionError") || 
-                                       String(error?.message).includes("MessageCounterError") ||
-                                       String(error?.stack).includes("Crypto");
+                logger.warn({ status, errMessage }, "Conexão Fechada");
 
-                if (isLoggedOut || isSessionError) {
-                    hardResetAuth(); // CHAMA A AUTO-CURA
-                } else if (statusCode === 409) { // Conflito
-                    logger.warn("Conflito detectado. Aguardando 10s antes de tentar reconectar...");
-                    cleanupSock();
-                    setTimeout(startWA, 10000);
-                } else {
-                    // Reconexão padrão
-                    cleanupSock();
-                    setTimeout(startWA, 5000);
+                // Lógica de Auto-Cura
+                if (
+                    status === DisconnectReason.loggedOut || 
+                    errMessage.includes("SessionError") ||
+                    errMessage.includes("MessageCounterError")
+                ) {
+                    nukeSession();
+                    setTimeout(startWA, 3000); // Reinicia limpo
+                } 
+                else if (status === 409 || errMessage.includes("conflict")) {
+                    logger.warn("Conflito detectado. Esperando 10s aleatórios para evitar briga...");
+                    setTimeout(startWA, 10000 + Math.random() * 5000);
+                } 
+                else if (status === 428 || status === 408) {
+                    logger.warn("Timeout de conexão. Tentando reconectar rápido...");
+                    setTimeout(startWA, 2000);
+                }
+                else {
+                    // Erro genérico, reconecta com backoff exponencial
+                    const delay = Math.min(reconnectAttempts * 2000, 30000) + 2000;
+                    reconnectAttempts++;
+                    logger.info(`Reconectando em ${delay}ms...`);
+                    setTimeout(startWA, delay);
                 }
             }
         });
 
-        sock.ws.on("pong", () => { lastPongAt = Date.now(); });
-
+        // --- MENSAGENS ---
         sock.ev.on("messages.upsert", async ({ messages, type }) => {
             if (type !== "notify" || !messages?.length) return;
+
             for (const m of messages) {
-                const msgId = m.key?.id;
-                if (handledMessageIds.has(msgId)) continue;
-                handledMessageIds.add(msgId);
-
-                if (m.key?.fromMe) continue;
-                
-                // Tratamento simplificado de JID para evitar erros
-                const jid = m.key?.remoteJid;
-                if (!jid || jid.includes("status")) continue;
-
-                const content = extractMessageContent ? extractMessageContent(m.message) : m.message;
-                const text = content?.conversation || content?.extendedTextMessage?.text || "";
-                if (!text) continue;
-
-                // Marca como lida para evitar acumular
-                try { await sock.readMessages([m.key]); } catch {}
-
                 try {
+                    const msgId = m.key.id;
+                    if (handledMessageIds.has(msgId)) continue;
+                    handledMessageIds.add(msgId);
+
+                    if (m.key.fromMe) continue;
+
+                    // Tratamento de JID e Conteúdo
+                    let jid = m.key.remoteJid;
+                    // Normaliza LID para JID de telefone se possível
+                    if (jid.includes("@lid") && store) {
+                         const contact = store.contacts[jid] || {};
+                         if (contact.id && !contact.id.includes("@lid")) jid = contact.id;
+                    }
+                    
+                    const content = extractMessageContent(m.message);
+                    const text = content?.conversation || content?.extendedTextMessage?.text || "";
+                    
+                    if (!text) continue;
+
+                    logger.info({ from: jid }, "Processando mensagem");
                     const reply = await flow.handleText(jid, text);
-                    if (reply && waReady && sock) {
+
+                    if (reply) {
                         await sock.sendMessage(jid, { text: reply });
                     }
-                } catch (e) {
-                    logger.error(e, "Erro no fluxo de conversa");
+                } catch (err) {
+                    // Se der erro de criptografia aqui, pode ser sinal de sessão podre
+                    if (String(err).includes("SessionError")) {
+                        logger.error("Erro de Sessão ao processar mensagem. Nuking...");
+                        sock.ws.close(); // Força close para cair no handler de limpeza
+                    } else {
+                        logger.error({ err: String(err) }, "Erro ao processar msg");
+                    }
                 }
             }
         });
 
-    } catch (e) {
-        logger.error(e, "Erro fatal ao iniciar WA");
-        // Se der erro fatal na inicialização (ex: corrupto), reseta tbm
-        if(String(e).includes("Corrupt") || String(e).includes("Unexpected end")) {
-            hardResetAuth();
-        } else {
-            setTimeout(() => { startingWA = false; startWA(); }, 5000);
-        }
+    } catch (err) {
+        logger.error(err, "Erro fatal no startWA");
+        setTimeout(startWA, 5000);
     } finally {
         startingWA = false;
     }
 }
 
-// --- SERVER ---
-app.get("/", (req, res) => res.send("Bot Online"));
+// --- SERVIDOR EXPRESS (MANTÉM O CONTAINER VIVO) ---
+app.get("/", (req, res) => res.send({ status: waReady ? "online" : "offline" }));
 app.get("/qr", (req, res) => {
-    if (!globalThis.__lastQR) return res.send("Aguarde o QR Code...");
-    res.send(`<div id="qrcode"></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><script>new QRCode(document.getElementById('qrcode'), { text: ${JSON.stringify(globalThis.__lastQR)}, width: 300, height: 300 });</script>`);
+    if (!globalThis.__lastQR) return res.send("Aguarde QR...");
+    res.send(`<div id="qrcode"></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><script>new QRCode(document.getElementById('qrcode'), { text: "${globalThis.__lastQR}", width: 300, height: 300 });</script>`);
 });
 
-const server = app.listen(PORT, () => {
-    logger.info({ PORT }, "Servidor HTTP rodando.");
+app.listen(PORT, () => {
+    logger.info(`Servidor rodando na porta ${PORT}`);
     startWA();
 });
 
-// --- GRACEFUL SHUTDOWN ---
-async function shutdown() {
-    logger.info("Desligando...");
-    cleanupSock();
-    server.close();
-    process.exit(0);
-}
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+// --- TRATAMENTO DE ERROS GLOBAIS ---
+process.on("uncaughtException", (err) => {
+    logger.error(err, "Uncaught Exception");
+    // Não sai do processo, tenta manter vivo
+});
+process.on("unhandledRejection", (err) => {
+    logger.error(err, "Unhandled Rejection");
+});
