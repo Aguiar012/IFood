@@ -3,9 +3,7 @@ name: AlmoPT
 on:
   workflow_dispatch:
   schedule:
-    # 06:00 America/Sao_Paulo (UTC-3) => 09:00 UTC
     - cron: '0 9 * * 1-5'
-    # 14:00 America/Sao_Paulo (UTC-3) => 17:00 UTC
     - cron: '0 17 * * 1-5'
 
 jobs:
@@ -29,31 +27,33 @@ jobs:
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT:   ${{ secrets.SMTP_PORT }}
           TO_ADDRESS:  ${{ secrets.TO_ADDRESS }}
+          
+          # Configurações do Bot Próprio
+          BOT_URL:     ${{ secrets.BOT_URL }}
+          ADMINS_E164: ${{ secrets.ADMINS_E164 }}
 
-          TWILIO_ACCOUNT_SID:  ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN:   ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_FROM:         ${{ secrets.TWILIO_FROM }} 
-          ADMINS_E164:         ${{ secrets.ADMINS_E164 }}
-
-          DATABASE_URL:        ${{ secrets.DATABASE_URL }} 
+          DATABASE_URL: ${{ secrets.DATABASE_URL }} 
         run: python auto_pedido.py
 
-      - name: Notify admins on failure (Twilio Sandbox)
+      - name: Notify admins on failure (Bot Próprio)
         if: failure()
         env:
-          TWILIO_ACCOUNT_SID:  ${{ secrets.TWILIO_ACCOUNT_SID }}
-          TWILIO_AUTH_TOKEN:   ${{ secrets.TWILIO_AUTH_TOKEN }}
-          TWILIO_FROM:         ${{ secrets.TWILIO_FROM }} # ex.: whatsapp:+14155238886
-          ADMINS_E164:         ${{ secrets.ADMINS_E164 }} # +5511932291930,+5511918796426
+          BOT_URL:     ${{ secrets.BOT_URL }}
+          ADMINS_E164: ${{ secrets.ADMINS_E164 }}
         run: |
+          # Verifica se tem URL configurada
+          if [ -z "$BOT_URL" ] || [ -z "$ADMINS_E164" ]; then
+            echo "BOT_URL ou ADMINS_E164 não configurados. Pulando alerta."
+            exit 0
+          fi
+
           IFS=',' read -ra ADMINS <<< "$ADMINS_E164"
+          MSG="❌ Falha FATAL no GitHub Actions (script quebrou). Verifique os logs: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          
           for A in "${ADMINS[@]}"; do
             A="${A//[[:space:]]/}"
-            TO="whatsapp:${A}"
-            MSG="Falha no GitHub Actions em ${GITHUB_REPOSITORY} | Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-            curl -sS -u "${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}" \
-              -X POST "https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json" \
-              --data-urlencode "From=${TWILIO_FROM}" \
-              --data-urlencode "To=${TO}" \
-              --data-urlencode "Body=${MSG}"
+            # Envia POST para o endpoint do seu bot
+            curl -sS -X POST "${BOT_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"number\": \"$A\", \"message\": \"$MSG\"}"
           done
