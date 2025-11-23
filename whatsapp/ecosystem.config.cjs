@@ -28,7 +28,10 @@ apps: [
       DATA_DIR: "/app/data",
       WA_AUTH_DIR: "/app/data/wa_auth_zapbot",
       // Força node a não rejeitar certificados antigos se houver proxy
-      NODE_TLS_REJECT_UNAUTHORIZED: "0" 
+      NODE_TLS_REJECT_UNAUTHORIZED: "0",
+      GMAIL_USER: "if.food.automatizacao@gmail.com", // <Coloque seu email real
+      GMAIL_APP_PASSWORD: "kcgakpcaktmdfaom", // <Coloque sua senha de app
+      CAE_EMAIL: "aguiartiago012@gmail.com"   // <Opcional
       }
   }
 ]
