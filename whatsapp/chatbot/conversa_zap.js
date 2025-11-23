@@ -1,3 +1,5 @@
+// ELE NAO DEVE RESPONDER GRUPOS. APENAS MENSAGENS
+
 import express from "express";
 import P from "pino";
 import { Boom } from "@hapi/boom";
@@ -133,6 +135,11 @@ async function startWA() {
                     handledMessageIds.add(msgId);
 
                     let jid = m.key.remoteJid;
+
+                    // --- ADICIONE ESTA LINHA AQUI ---
+                    if (jid.endsWith("@g.us")) continue; // Ignora mensagens de grupo
+                    // --------------------------------
+                  
                     if (jid.includes("@lid") && store) {
                          const c = store.contacts[jid];
                          if (c?.id && !c.id.includes("@lid")) jid = c.id;
