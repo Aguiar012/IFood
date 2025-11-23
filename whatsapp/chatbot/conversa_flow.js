@@ -4,7 +4,7 @@ import { Pool } from "pg";
 import nodemailer from "nodemailer";
 
 function onlyDigits(s = "") { return (s || "").replace(/\D/g, ""); }
-// Extrai apenas os números para usar como chave estável (ignora @s.whatsapp.net ou @lid)
+// Extrai apenas os números para usar como chave estável
 function jidToPhone(jid = "") { return onlyDigits(String(jid).split("@")[0]); }
 function strip(s = "") { return String(s || "").trim(); }
 function norm(s = "") {
@@ -14,8 +14,9 @@ function norm(s = "") {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
-
 // ---- dias da semana ----
+const DIAS_SEMANA = ["Domingo", "Segunda-Feira", "Terça-Feira", "Quarta-Feira", "Quinta-Feira", "Sexta-Feira", "Sábado"];
+
 function parseDiasLista(txt = "") {
   const map = {
     "seg": 1, "segunda": 1, "segunda-feira": 1,
@@ -46,7 +47,6 @@ function ddmm(d) {
 }
 
 function isoDateUTC(d) {
-  // YYYY-MM-DD, usado só para comparar "mesmo dia alvo" no state
   return new Date(d).toISOString().slice(0, 10);
 }
 
@@ -62,12 +62,8 @@ function cutoff1315(dt) {
   return x;
 }
 
-// [CORREÇÃO 2] Lógica de Cancelamento Ajustada para Fim de Semana
 function diaCancelamentoAlvo(now = new Date()) {
-  // 1. Regra base: <= 13:15 é hoje, > 13:15 é amanhã
   let target = (now <= cutoff1315(now)) ? now : addDays(now, 1);
-
-  // 2. Se cair Sábado (6) ou Domingo (0), avança até Segunda (1)
   while (target.getDay() === 0 || target.getDay() === 6) {
     target = addDays(target, 1);
   }
@@ -77,16 +73,33 @@ function diaCancelamentoAlvo(now = new Date()) {
 // ---- helpers de data / motivo para pedidos ----
 function formatDiaBR(dateLike) {
   if (!dateLike) return "?";
+  // Tenta parsing manual YYYY-MM-DD para evitar timezone mess
   const s = String(dateLike);
   const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) {
-    return `${m[3]}/${m[2]}`;
+    return `${m[3]}/${m[2]}`; // DD/MM
   }
+  // Fallback Date object
   const d = new Date(dateLike);
   if (Number.isNaN(d.getTime())) return s;
   const dd = String(d.getDate()).padStart(2, "0");
   const mm = String(d.getMonth() + 1).padStart(2, "0");
   return `${dd}/${mm}`;
+}
+
+function getDiaSemanaNome(dateLike) {
+  if (!dateLike) return "";
+  const s = String(dateLike);
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  let d;
+  if (m) {
+    // Cria data localmente (ano, mes-1, dia) para garantir dia da semana correto
+    d = new Date(parseInt(m[1]), parseInt(m[2]) - 1, parseInt(m[3]));
+  } else {
+    d = new Date(dateLike);
+  }
+  if (Number.isNaN(d.getTime())) return "";
+  return DIAS_SEMANA[d.getDay()];
 }
 
 function classificaMotivo(motivoRaw = "") {
@@ -108,46 +121,48 @@ function classificaMotivo(motivoRaw = "") {
   return { tipo, detalhe, bruto: full };
 }
 
-function resumoUltimoPedidoLinha(ultimo) {
-  if (!ultimo) {
-    return "Último registro de pedido: ainda não há nenhum registro recente.\n";
-  }
-  const data = formatDiaBR(ultimo.dia_pedido);
-  const { tipo, detalhe, bruto } = classificaMotivo(ultimo.motivo);
-
-  let txt;
-  if (tipo === "NAO_PEDIU") {
-    txt = "não foi feito pedido automático (provavelmente por bloqueio de prato).";
-  } else if (tipo === "PEDIU_OK") {
-    txt = "pedido feito normalmente pelo sistema automático.";
-  } else if (tipo === "ERRO_PEDIDO") {
-    txt = "houve erro ao tentar pedir no site.";
-  } else {
-    txt = bruto || "motivo não registrado.";
-  }
-  return `Último registro de pedido: ${data} – ${txt}\n`;
-}
-
-// ---- header / identidade visual ----
-function header(aluno, ultimoPedido) {
+// ---- header / identidade visual NOVO FORMATO ----
+function header(aluno, ultimoPedido, pratoAtual) {
   const titulo = "IFSP Pirituba | Assistente de Almoço\n";
   if (!aluno) {
-    let base =
-      titulo +
+    return titulo +
       "Você está falando com o robô que ajuda no sistema de pedidos de almoço do câmpus.\n" +
-      resumoUltimoPedidoLinha(null) +
       "--------------------------------\n";
-    return base;
   }
+
   const pront = aluno.prontuario || "não informado";
   const nome = aluno.nome || "Aluno";
-  let txt =
+
+  // Linha do Último Pedido
+  let linhaPedido = "Último registro de pedido: nenhum registro recente.";
+  if (ultimoPedido) {
+    const data = formatDiaBR(ultimoPedido.dia_pedido);
+    const diaSemana = getDiaSemanaNome(ultimoPedido.dia_pedido);
+    const { tipo } = classificaMotivo(ultimoPedido.motivo);
+    
+    let statusEmoji = "❓";
+    if (tipo === "PEDIU_OK") statusEmoji = "✅";
+    else if (tipo === "NAO_PEDIU") statusEmoji = "⚠️ (Bloqueio/Pulo)";
+    else if (tipo === "ERRO_PEDIDO") statusEmoji = "❌ (Erro)";
+
+    linhaPedido = `Último registro de pedido: ${data} - ${diaSemana} ${statusEmoji}`;
+  }
+
+  // Linha do Prato Atual
+  let linhaPrato = "Prato Atual: informação indisponível.";
+  if (pratoAtual && pratoAtual.prato_nome) {
+    const dataPrato = formatDiaBR(pratoAtual.dia_referente);
+    linhaPrato = `Prato Atual: ${pratoAtual.prato_nome} (Almoço de ${dataPrato})`;
+  }
+
+  return (
     titulo +
     `Aluno: ${nome}\n` +
     `Prontuário: ${pront}\n` +
-    resumoUltimoPedidoLinha(ultimoPedido) +
-    "--------------------------------\n";
-  return txt;
+    `${linhaPedido}\n` +
+    `${linhaPrato}\n` +
+    "--------------------------------\n"
+  );
 }
 
 // ---- e-mail de cancelamento (Gmail) ----
@@ -176,7 +191,6 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     try { fs.writeFileSync(STORE_FILE, JSON.stringify(state)); } catch { }
   }
 
-  // AGORA USAMOS A CHAVE DO USUÁRIO (userKey) E NÃO O JID DIRETO
   function getUser(userKey) {
     return state[userKey] || (state[userKey] = { step: "NEW", temp: {} });
   }
@@ -189,7 +203,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 // --- helper para envio de e-mail de cancelamento ---
   async function sendCancelEmail({ aluno, alvoDate, phone }) {
     if (!mailTransporter || !CAE_EMAIL) {
-      logger.error("E-mail de cancelamento não configurado (GMAIL_USER / GMAIL_APP_PASSWORD / CAE_EMAIL).");
+      logger.error("E-mail de cancelamento não configurado.");
       return { ok: false, reason: "NO_TRANSPORT" };
     }
 
@@ -198,9 +212,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     const nome = aluno.nome || "Aluno";
     const prontBase = String(aluno.prontuario || "").toUpperCase();
     const prontCompleto = prontBase.startsWith("PT") ? prontBase : `PT${prontBase}`;
-    const prontNumerico = onlyDigits(prontBase); // Apenas números para cópia fácil
-    const tel = phone || "";
-
+    const prontNumerico = onlyDigits(prontBase);
+    
     const subject = `Cancelamento de almoço - ${prontCompleto} - ${dataStr}`;
     
     const html = `
@@ -208,20 +221,15 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         <h2 style="color: #d9534f;">Solicitação de Cancelamento de Almoço</h2>
         <p><strong>Aluno:</strong> ${nome}</p>
         <p><strong>Prontuário:</strong> ${prontCompleto}</p>
-        
         <div style="background-color: #f8f9fa; border: 1px solid #ddd; padding: 15px; margin: 20px 0; border-radius: 5px;">
-          <p style="margin: 0 0 10px;">Para copiar o prontuário (apenas números):</p>
+          <p style="margin: 0 0 10px;">Para copiar o prontuário:</p>
           <span style="font-size: 24px; font-weight: bold; letter-spacing: 2px; background: #fff; padding: 5px 10px; border: 1px dashed #999;">
             ${prontNumerico}
           </span>
         </div>
-
         <p><strong>Data a cancelar:</strong> ${diaSemana}, ${dataStr}</p>
-        
         <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-        <p style="font-size: 12px; color: #777;">
-          Mensagem gerada automaticamente pelo Assistente de Almoço (piloto 2º ano Redes).
-        </p>
+        <p style="font-size: 12px; color: #777;">Mensagem automática.</p>
       </div>
     `;
 
@@ -237,7 +245,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       });
       return { ok: true };
     } catch (err) {
-      logger.error("Erro ao enviar e-mail de cancelamento:", err);
+      logger.error("Erro ao enviar e-mail:", err);
       return { ok: false, reason: "SMTP_ERROR", error: String(err) };
     }
   }
@@ -274,32 +282,23 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
   async function ensureAlunoContato(c, { prontuario, telefone }) {
     const aluno = await findAlunoByProntuario(c, prontuario);
-    if (!aluno) {
-      return { ok: false, reason: "NAO_TURMA" };
-    }
+    if (!aluno) return { ok: false, reason: "NAO_TURMA" };
 
     const { rows } = await c.query(
-      `SELECT telefone FROM contato WHERE aluno_id = $1 LIMIT 1`,
-      [aluno.id]
+      `SELECT telefone FROM contato WHERE aluno_id = $1 LIMIT 1`, [aluno.id]
     );
 
     if (rows.length) {
       const telExistente = onlyDigits(rows[0].telefone || "");
       const telNovo = onlyDigits(telefone || "");
       if (telExistente !== telNovo) {
-        return {
-          ok: false,
-          reason: "JA_VINCULADO",
-          telefone: telExistente,
-          aluno
-        };
+        return { ok: false, reason: "JA_VINCULADO", telefone: telExistente, aluno };
       }
       return { ok: true, alunoId: aluno.id, aluno };
     }
 
     await c.query(
-      `INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`,
-      [aluno.id, telefone]
+      `INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`, [aluno.id, telefone]
     );
     return { ok: true, alunoId: aluno.id, aluno };
   }
@@ -322,8 +321,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           WHERE NOT EXISTS (
             SELECT 1 FROM prato_bloqueado
             WHERE aluno_id=$1 AND lower(nome)=lower($2)
-          )`,
-        [alunoId, nome]
+          )`, [alunoId, nome]
       );
     }
   }
@@ -334,57 +332,50 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
   async function getPreferenciasDias(c, alunoId) {
     const { rows } = await c.query(
-      `SELECT dia_semana
-          FROM preferencia_dia
-        WHERE aluno_id = $1
-        ORDER BY dia_semana`,
-      [alunoId]
+      `SELECT dia_semana FROM preferencia_dia WHERE aluno_id = $1 ORDER BY dia_semana`, [alunoId]
     );
     return rows.map(r => r.dia_semana);
   }
 
   async function getBloqueiosAluno(c, alunoId) {
     const { rows } = await c.query(
-      `SELECT nome
-          FROM prato_bloqueado
-        WHERE aluno_id = $1
-        ORDER BY nome`,
-      [alunoId]
+      `SELECT nome FROM prato_bloqueado WHERE aluno_id = $1 ORDER BY nome`, [alunoId]
     );
     return rows.map(r => r.nome);
   }
 
-  // [CORREÇÃO 1] Adicionado filtro para ignorar "anteriormente" (redundância) e "Erros de Finais de Semana"
   async function getUltimoPedido(c, alunoId) {
     const { rows } = await c.query(
-      `SELECT dia_pedido, motivo
-          FROM pedido
-        WHERE aluno_id = $1
-          AND motivo NOT ILIKE '%anteriormente%' AND motivo NOT LIKE '%Final%' 
-        ORDER BY dia_pedido DESC, id DESC
-        LIMIT 1`,
-      [alunoId]
+      `SELECT dia_pedido, motivo FROM pedido
+        WHERE aluno_id = $1 AND motivo NOT ILIKE '%anteriormente%' AND motivo NOT LIKE '%Final%'
+        ORDER BY dia_pedido DESC, id DESC LIMIT 1`, [alunoId]
     );
     return rows[0] || null;
   }
 
-  // [CORREÇÃO 1] Adicionado filtro para ignorar "anteriormente" no histórico também
   async function getUltimosPedidos(c, alunoId) {
     const { rows } = await c.query(
-      `SELECT dia_pedido, motivo
-          FROM pedido
-        WHERE aluno_id = $1
-          AND dia_pedido >= (CURRENT_DATE - INTERVAL '7 days')
+      `SELECT dia_pedido, motivo FROM pedido
+        WHERE aluno_id = $1 AND dia_pedido >= (CURRENT_DATE - INTERVAL '7 days')
           AND motivo NOT ILIKE '%anteriormente%' AND motivo NOT LIKE '%Final%'
-        ORDER BY dia_pedido DESC, id DESC`,
-      [alunoId]
+        ORDER BY dia_pedido DESC, id DESC`, [alunoId]
     );
     return rows;
   }
 
-  function helpText(aluno, ultimoPedido) {
+  // === NOVA FUNÇÃO: PEGAR PRATO ATUAL (Do Banco) ===
+  async function getPratoAtual(c) {
+    // Pega o registro mais recente que foi atualizado no banco
+    // A tabela é 'proximo_prato' (dia_referente, prato_nome, updated_at)
+    const { rows } = await c.query(
+      `SELECT dia_referente, prato_nome FROM proximo_prato ORDER BY updated_at DESC LIMIT 1`
+    );
+    return rows[0] || null;
+  }
+
+  function helpText(aluno, ultimoPedido, pratoAtual) {
     return (
-      header(aluno, ultimoPedido) +
+      header(aluno, ultimoPedido, pratoAtual) +
       "Menu principal\n\n" +
       "• *Cancelar* → mandar e-mail de cancelamento de almoço para a CAE\n" +
       "• *Preferência* → escolher dias em que você costuma almoçar no câmpus\n" +
@@ -397,7 +388,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
   }
 
   const ONBOARDING =
-    header(null, null) +
+    "IFSP Pirituba | Assistente de Almoço\n--------------------------------\n" +
     "Eu ajudo a registrar cancelamento de almoço (via e-mail para a CAE)\n" +
     "e preferências (dias e pratos) no sistema de pedidos de almoço do câmpus Pirituba.\n\n" +
     "Pra começar o cadastro, envie: *CONTINUAR*.\n" +
@@ -408,39 +399,31 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     const text = strip(textRaw);
     if (!text) return null;
 
-    // CRÍTICO: Usamos o userKey (apenas números) para identificar o usuário.
-    // Isso evita que @lid e @s.whatsapp.net sejam vistos como pessoas diferentes.
     const userKey = jidToPhone(jid);
     const u = getUser(userKey);
-
-    // Usamos o userKey também para buscas no banco (assumindo que salvamos assim)
     const phone = userKey;
 
-    const aluno = await withConn(c => findAlunoByTelefone(c, phone));
+    const { aluno, ultimoPedido, pratoAtual } = await withConn(async c => {
+        const a = await findAlunoByTelefone(c, phone);
+        const up = a ? await getUltimoPedido(c, a.id) : null;
+        const pa = await getPratoAtual(c);
+        return { aluno: a, ultimoPedido: up, pratoAtual: pa };
+    });
+
     if (aluno && !u.aluno_id) {
       setUser(userKey, { aluno_id: aluno.id, step: "MAIN", temp: {} });
     }
-
-    const ultimoPedido = aluno
-      ? await withConn(c => getUltimoPedido(c, aluno.id))
-      : null;
 
     const n = norm(text);
 
     // atalhos globais
     if (["ajuda", "menu", "help", "comandos"].includes(n)) {
       setUser(userKey, { step: "MAIN", temp: {} });
-      return helpText(aluno || null, ultimoPedido);
+      return helpText(aluno || null, ultimoPedido, pratoAtual);
     }
 
     if (n === "status" || n === "meu status" || n === "cadastro") {
-      if (!aluno) {
-        return (
-          header(null, null) +
-          "Seu número ainda *não está vinculado* a nenhum cadastro de aluno no sistema de almoço do IFSP Pirituba.\n\n" +
-          "Pra começar o cadastro, envie: *CONTINUAR*."
-        );
-      }
+      if (!aluno) return header(null, null, pratoAtual) + "Seu número ainda *não está vinculado*. Envie: *CONTINUAR*.";
 
       const info = await withConn(async c => {
         const dias = await getPreferenciasDias(c, aluno.id);
@@ -448,15 +431,11 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         return { dias, bloqueios };
       });
 
-      const diasTxt = info.dias.length
-        ? diasHumanos(info.dias)
-        : "nenhum dia cadastrado";
-      const bloqueiosTxt = info.bloqueios.length
-        ? info.bloqueios.join(", ")
-        : "nenhum prato bloqueado";
+      const diasTxt = info.dias.length ? diasHumanos(info.dias) : "nenhum";
+      const bloqueiosTxt = info.bloqueios.length ? info.bloqueios.join(", ") : "nenhum";
 
       return (
-        header(aluno, ultimoPedido) +
+        header(aluno, ultimoPedido, pratoAtual) +
         "*Status do seu cadastro*\n\n" +
         `• Nome: *${aluno.nome || "não informado"}*\n` +
         `• Prontuário: *${aluno.prontuario || "não informado"}*\n` +
@@ -467,105 +446,51 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       );
     }
 
-    if (
-      n === "historico" ||
-      n === "historico pedidos" ||
-      n === "meus pedidos" ||
-      n === "ultimos pedidos" ||
-      n === "últimos pedidos"
-    ) {
-      if (!aluno) {
-        return (
-          header(null, null) +
-          "Ainda não encontrei seu cadastro de aluno.\n\n" +
-          "Pra começar o cadastro e ter histórico de pedidos, envie *CONTINUAR*."
-        );
-      }
+    if (n.includes("historico")) {
+      if (!aluno) return header(null, null, pratoAtual) + "Cadastro não encontrado. Envie *CONTINUAR*.";
 
       const pedidos = await withConn(c => getUltimosPedidos(c, aluno.id));
-
       if (!pedidos.length) {
-        return (
-          header(aluno, ultimoPedido) +
-          "Histórico de pedidos (últimos 7 dias)\n\n" +
-          "Não encontrei nenhum registro de pedido recente pra este prontuário."
-        );
+        return header(aluno, ultimoPedido, pratoAtual) + "Histórico de pedidos\n\nNão encontrei registros recentes.";
       }
 
       const linhas = pedidos.map(p => {
         const data = formatDiaBR(p.dia_pedido);
         const { tipo, detalhe, bruto } = classificaMotivo(p.motivo);
-        let desc;
-        if (tipo === "PEDIU_OK") {
-          desc = "Foi feito pedido automático com sucesso no site do SICA.";
-          if (detalhe) desc += ` Detalhe: ${detalhe}`;
-        } else if (tipo === "NAO_PEDIU") {
-          desc = "Não foi feito pedido automático, pois o prato tinha algum item bloqueado nas suas preferências.";
-          if (detalhe) desc += ` Detalhe: ${detalhe}`;
-        } else if (tipo === "ERRO_PEDIDO") {
-          desc = "Tentamos fazer o pedido automático, mas o site respondeu com erro.";
-          if (detalhe) desc += ` Detalhe: ${detalhe}`;
-        } else {
-          desc = bruto || "Motivo não informado.";
-        }
+        let desc = bruto;
+        if (tipo === "PEDIU_OK") desc = "✅ Pedido com sucesso.";
+        else if (tipo === "NAO_PEDIU") desc = "⚠️ Bloqueado/Pulo.";
+        else if (tipo === "ERRO_PEDIDO") desc = "❌ Erro no site.";
+        
+        if(detalhe) desc += ` (${detalhe})`;
         return `• ${data} → ${desc}`;
       });
 
       return (
-        header(aluno, ultimoPedido) +
-        "Histórico de pedidos (últimos 7 dias)\n\n" +
-        linhas.join("\n") +
-        "\n\nSe quiser revisar suas preferências, envie *Preferência* ou *Bloquear*."
+        header(aluno, ultimoPedido, pratoAtual) +
+        "Histórico de pedidos (7 dias)\n\n" +
+        linhas.join("\n")
       );
     }
 
-    // ================= cadastro (ainda não existe no banco) =================
+    // ================= cadastro =================
     if (!aluno) {
-      
-      // 1. Processa prontuário (se estiver no passo certo)
       if (u.step === "ASK_PRONT") {
-          let pront = strip(text)
-            .replace(/\s+/g, "")
-            .toUpperCase()
-            .replace(/^PT/, "");
-          pront = pront.replace(/\D/g, "");
-  
+          let pront = strip(text).replace(/\s+/g, "").toUpperCase().replace(/^PT/, "").replace(/\D/g, "");
           if (!/^\d{5,12}$/.test(pront)) {
-            return (
-              header(null, null) +
-              "*Formato de prontuário inválido.*\n\n" +
-              "Envie algo como *3029791*.\n" +
-              "Use o mesmo código numérico que aparece no SUAP (sem PT)."
-            );
+            return header(null, null, pratoAtual) + "*Formato inválido.* Envie algo como *3029791*.";
           }
-  
           setUser(userKey, { step: "ASK_DIAS_REG", temp: { prontuario: pront } });
-  
-          return (
-            header(null, null) +
-            "*Prontuário recebido!*\n\n" +
-            "Agora me diga em quais dias você *costuma almoçar* no câmpus.\n" +
-            "Exemplo: *seg, ter, qua, qui, sex*."
-          );
+          return header(null, null, pratoAtual) + "*Prontuário recebido!*\nAgora envie os dias (ex: *seg, ter*).";
       }
   
-      // 2. Gatilho GLOBAL de Continuar (Evita loops se o estado se perder)
       if (n.includes("continuar") || n.includes("sim") || n.includes("bora") || n.includes("quero")) {
              setUser(userKey, { step: "ASK_PRONT", temp: {} });
-             return (
-               header(null, null) +
-               "*Cadastro de aluno – Piloto 2º ano Redes*\n\n" +
-               "Agora envie seu prontuário IFSP (ex.: 3029701). Não precisa colocar PT na frente."
-             );
+             return header(null, null, pratoAtual) + "*Cadastro Piloto*\nEnvie seu prontuário IFSP (apenas números).";
       }
 
       if (u.step === "ASK_CONSENT") {
-             return (
-                header(null, null) +
-                "Tranquilo, sem problemas.\n\n" +
-                "Quando você quiser usar o sistema automático de pedidos de almoço do IFSP Pirituba,\n" +
-                "basta responder *CONTINUAR*."
-             );
+             return header(null, null, pratoAtual) + "Tranquilo. Quando quiser, envie *CONTINUAR*.";
       }
 
       if (u.step === "NEW") {
@@ -575,23 +500,15 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
       if (u.step === "ASK_DIAS_REG") {
         const dias = parseDiasLista(text);
-        if (!dias.length) {
-          return (
-            header(null, null) +
-            "Não entendi os dias.\n\n" +
-            "Exemplos válidos: *seg, qua, sex* ou *segunda, terça, quinta*."
-          );
-        }
+        if (!dias.length) return header(null, null, pratoAtual) + "Não entendi. Envie ex: *seg, qua*.";
 
         const pront = u.temp?.prontuario;
         if (!pront) {
-          // Se perdeu o prontuário da memória, recomeça
           setUser(userKey, { step: "NEW", temp: {} });
           return ONBOARDING;
         }
 
         const res = await withConn(async c => {
-          // Aqui passamos o userKey (que é o número) para salvar no banco
           const vinculo = await ensureAlunoContato(c, { prontuario: pront, telefone: phone });
           if (!vinculo.ok) return vinculo;
           await setPreferenciasDias(c, vinculo.alunoId, dias);
@@ -600,94 +517,35 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         });
 
         if (!res.ok) {
-          if (res.reason === "NAO_TURMA") {
-            return (
-              header(null, null) +
-              "*Prontuário não encontrado na turma do piloto.*\n\n" +
-              "Este teste está habilitado só para o *2º ano de Redes*.\n" +
-              "Confere se você digitou o código igual ao do SUAP."
-            );
-          }
-          if (res.reason === "JA_VINCULADO") {
-            return (
-              header(null, null) +
-              "*Esse prontuário já foi cadastrado antes.*\n\n" +
-              "Ele já está vinculado a outro número de WhatsApp.\n" +
-              "Se isso estiver errado, procure a CAE ou o responsável pelo projeto."
-            );
-          }
-          return (
-             header(null, null) +
-             "Tive um problema ao salvar seu cadastro.\n" +
-             "Tenta novamente mais tarde ou fala com o responsável pelo projeto."
-           );
+          if (res.reason === "NAO_TURMA") return header(null, null, pratoAtual) + "*Prontuário não encontrado na turma.*";
+          if (res.reason === "JA_VINCULADO") return header(null, null, pratoAtual) + "*Prontuário já vinculado a outro número.*";
+          return header(null, null, pratoAtual) + "Erro no sistema.";
         }
 
-        const alunoBanco = {
-          nome: res.aluno?.nome,
-          prontuario: res.aluno?.prontuario,
-          ativo: true
-        };
-
+        const alunoBanco = { nome: res.aluno?.nome, prontuario: res.aluno?.prontuario, ativo: true };
         setUser(userKey, { step: "MAIN", temp: {}, aluno_id: res.alunoId });
-
-        return (
-          header(alunoBanco, null) +
-          "*Cadastro concluído no sistema automático de pedidos (piloto 2º ano Redes).* \n\n" +
-          `Dias preferidos registrados: *${diasHumanos(dias)}*.\n\n` +
-          "A partir de agora, você pode:\n" +
-          "• Enviar *Cancelar* para mandar um e-mail de cancelamento de almoço.\n" +
-          "• Enviar *Preferência* para alterar os dias.\n" +
-          "• Enviar *Bloquear* para registrar pratos que não come.\n\n" +
-          "Envie *Ajuda* para ver o menu completo."
-        );
+        return header(alunoBanco, null, pratoAtual) + "*Cadastro concluído!* Envie *Ajuda* para ver opções.";
       }
-
       return ONBOARDING;
     }
 
-    // ================= aluno já conhecido =================
+    // ================= aluno logado =================
     const alunoAtual = aluno;
 
     if (u.step === "SET_DIAS") {
       const dias = parseDiasLista(text);
-      if (!dias.length) {
-        return (
-          header(alunoAtual, ultimoPedido) +
-          "Não entendi os dias.\n\n" +
-          "Envie algo como: *seg, qua, sex* ou *segunda, terça, quinta*."
-        );
-      }
+      if (!dias.length) return header(alunoAtual, ultimoPedido, pratoAtual) + "Não entendi. Envie ex: *seg, ter*.";
       await withConn(c => setPreferenciasDias(c, alunoAtual.id, dias));
       setUser(userKey, { step: "MAIN", temp: {} });
-      return (
-        header(alunoAtual, ultimoPedido) +
-        "*Preferências de dias atualizadas!*\n\n" +
-        `Dias cadastrados para o refeitório do câmpus Pirituba: *${diasHumanos(dias)}*.\n\n` +
-        "Envie *Ajuda* para voltar ao menu."
-      );
+      return header(alunoAtual, ultimoPedido, pratoAtual) + `*Dias atualizados:* ${diasHumanos(dias)}.`;
     }
 
     if (u.step === "SET_BLOQ") {
       const itens = text.split(/[,;\n]+/).map(strip).filter(Boolean);
-      if (!itens.length) {
-        return (
-          header(alunoAtual, ultimoPedido) +
-          "Não encontrei nenhum prato na sua mensagem.\n\n" +
-          "Envie os *pratos* que deseja bloquear, separados por vírgula.\n" +
-          "Ex.: *carne moída, estrogonofe*."
-        );
-      }
+      if (!itens.length) return header(alunoAtual, ultimoPedido, pratoAtual) + "Envie os pratos para bloquear (ex: peixe).";
       await withConn(c => addBloqueios(c, alunoAtual.id, itens));
       setUser(userKey, { step: "MAIN", temp: {} });
-      return (
-        header(alunoAtual, ultimoPedido) +
-        "*Bloqueios salvos!*\n\n" +
-        `Pratos bloqueados: *${itens.join(", ")}*.\n\n` +
-        "Essas informações serão usadas quando formos montar seus pedidos\n" +
-        "no sistema automático de almoço do IFSP Pirituba.\n\n" +
-        "Envie *Ajuda* para voltar ao menu."
-      );
+      return header(alunoAtual, ultimoPedido, pratoAtual) + `*Bloqueios salvos:* ${itens.join(", ")}.`;
     }
 
     if (u.step === "CONFIRM_CANCEL") {
@@ -695,160 +553,55 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
       const alvoIso = isoDateUTC(d);
 
-      if (["sim", "s", "ok", "yes", "confirmar", "confirmo"].includes(n)) {
+      if (["sim", "s", "ok", "yes", "confirmar"].includes(n)) {
         if (u.lastCancelDate === alvoIso) {
-          return (
-            header(alunoAtual, ultimoPedido) +
-            "*Esse almoço já teve um pedido de cancelamento registrado para esse número.*\n\n" +
-            `Alvo: *${alvo}*.\n` +
-            "Não vou enviar outro e-mail para evitar duplicidade.\n\n" +
-            "Se achar que houve erro, procure a CAE."
-          );
+          return header(alunoAtual, ultimoPedido, pratoAtual) + "*Já existe pedido de cancelamento para este dia.*";
         }
-
         const resEmail = await sendCancelEmail({ aluno: alunoAtual, alvoDate: d, phone });
-
-        if (!resEmail.ok) {
-          return (
-            header(alunoAtual, ultimoPedido) +
-            "Tentei mandar o e-mail de cancelamento, mas aconteceu um erro técnico.\n\n" +
-            "Recomendo cancelar manualmente pelo site ou diretamente com a CAE.\n\n" +
-            "Detalhe técnico (para o responsável pelo sistema): " +
-            (resEmail.reason || "erro ao enviar e-mail") +
-            "."
-          );
-        }
-
+        if (!resEmail.ok) return header(alunoAtual, ultimoPedido, pratoAtual) + "Erro ao enviar e-mail.";
+        
         setUser(userKey, { step: "MAIN", temp: {}, lastCancelDate: alvoIso });
-
-        return (
-          header(alunoAtual, ultimoPedido) +
-          "*Pedido de cancelamento registrado.*\n\n" +
-          `Enviei um e-mail para a CAE pedindo o cancelamento do almoço de *${alvo}*,\n` +
-          `usando o seu prontuário *${alunoAtual.prontuario}*.\n\n` +
-          "Guarde esta mensagem como comprovante.\n" +
-          "Envie *Status* para ver seus dados ou *Ajuda* para o menu."
-        );
+        return header(alunoAtual, ultimoPedido, pratoAtual) + `*Cancelamento enviado para ${alvo}.*`;
       }
-
-      if (["nao", "não", "n", "cancelar", "voltar", "parar"].includes(n)) {
+      if (["nao", "não", "n", "cancelar"].includes(n)) {
         setUser(userKey, { step: "MAIN", temp: {} });
-        return (
-          header(alunoAtual, ultimoPedido) +
-          "Beleza, não vou registrar nenhum cancelamento agora.\n\n" +
-          "Se quiser cancelar depois, envie *Cancelar*.\n" +
-          "Envie *Ajuda* para ver as opções."
-        );
+        return header(alunoAtual, ultimoPedido, pratoAtual) + "Cancelamento abortado.";
       }
-
-      return (
-        header(alunoAtual, ultimoPedido) +
-        "Só pra confirmar:\n\n" +
-        `Você deseja que eu mande um *e-mail de cancelamento do almoço de ${alvo}* ` +
-        `para a CAE do IFSP Pirituba usando o seu prontuário *${alunoAtual.prontuario}*?\n\n` +
-        "Responda *SIM* para confirmar ou *NÃO* para voltar."
-      );
+      return header(alunoAtual, ultimoPedido, pratoAtual) + `Confirma cancelar almoço de *${alvo}*? (Sim/Não)`;
     }
 
-    // intenções principais
-    if (
-      n.startsWith("cancelar") ||
-      n === "nao vou" ||
-      n === "nao vou almocar" ||
-      n === "não vou" ||
-      n === "não vou almoçar"
-    ) {
+    if (n.startsWith("cancelar") || n.includes("nao vou")) {
       const alvoDate = diaCancelamentoAlvo(new Date());
       const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
       const alvoIso = isoDateUTC(alvoDate);
 
-      if (u.lastCancelDate === alvoIso) {
-        return (
-          header(alunoAtual, ultimoPedido) +
-          "*Já existe um pedido de cancelamento registrado para esse dia usando este número.*\n\n" +
-          `Alvo atual pelas regras de horário: *${alvo}*.\n` +
-          "Não vou abrir outro pedido para evitar duplicidade.\n\n" +
-          "Se achar que houve algum erro, procure a CAE."
-        );
-      }
-
+      if (u.lastCancelDate === alvoIso) return header(alunoAtual, ultimoPedido, pratoAtual) + "*Já existe cancelamento para este dia.*";
+      
       setUser(userKey, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate } });
-
-      return (
-        header(alunoAtual, ultimoPedido) +
-        "Cancelamento de almoço\n\n" +
-        "Regras da CAE (almoço):\n" +
-        "• Até *13:15*: cancela o almoço de *hoje*.\n" +
-        "• Depois de *13:15*: cancela o almoço de *amanhã*.\n\n" +
-        `Pela hora atual, o alvo é: *${alvo}*.\n\n` +
-        `Confirmar que eu mande um e-mail para cancelar esse almoço usando seu prontuário *${alunoAtual.prontuario}*?\n\n` +
-        "Responda *SIM* para confirmar ou *NÃO* para voltar."
-      );
+      return header(alunoAtual, ultimoPedido, pratoAtual) + `Deseja cancelar o almoço de *${alvo}*? Responda *Sim*.`;
     }
 
-    if (
-      n.startsWith("preferencia") ||
-      n === "preferencias" ||
-      n === "dia" ||
-      n === "dias"
-    ) {
+    if (n.startsWith("preferencia") || n === "dias") {
       setUser(userKey, { step: "SET_DIAS", temp: {} });
-      return (
-        header(alunoAtual, ultimoPedido) +
-        "Atualizar dias em que você costuma almoçar\n\n" +
-        "Envie os dias da semana que normalmente você almoça no câmpus.\n" +
-        "Exemplos: *seg, ter, qua, qui, sex* ou *segunda, terça, quinta*."
-      );
+      return header(alunoAtual, ultimoPedido, pratoAtual) + "Envie os dias que almoça (ex: seg, qua).";
     }
 
-    if (
-      n.startsWith("bloquear") ||
-      n.includes("nao como") ||
-      n.includes("não como") ||
-      n.includes("alergia")
-    ) {
+    if (n.startsWith("bloquear") || n.includes("nao como")) {
       setUser(userKey, { step: "SET_BLOQ", temp: {} });
-      return (
-        header(alunoAtual, ultimoPedido) +
-        "Bloquear pratos no sistema\n\n" +
-        "Envie os *pratos* que você não come / tem alergia / prefere evitar,\n" +
-        "separados por vírgula. Ex.: *frango xadrez, feijoada*."
-      );
+      return header(alunoAtual, ultimoPedido, pratoAtual) + "Envie pratos para bloquear (separados por vírgula).";
     }
 
     if (n === "ativar") {
       await withConn(c => setAtivo(c, alunoAtual.id, true));
-      return (
-        header({ ...alunoAtual, ativo: true }, ultimoPedido) +
-        "Seu cadastro no sistema automático de almoço do IFSP Pirituba foi *ativado*.\n\n" +
-        "Você continuará recebendo as ações com base nas suas preferências.\n" +
-        "Envie *Ajuda* para ver o menu."
-      );
+      return header({ ...alunoAtual, ativo: true }, ultimoPedido, pratoAtual) + "Cadastro *ativado*.";
     }
 
     if (n === "desativar" || n === "pausar") {
       await withConn(c => setAtivo(c, alunoAtual.id, false));
-      return (
-        header({ ...alunoAtual, ativo: false }, ultimoPedido) +
-        "Seu cadastro no sistema automático de almoço do IFSP Pirituba foi *desativado*.\n\n" +
-        "Você pode enviar *Ativar* quando quiser voltar.\n" +
-        "Envie *Ajuda* para ver o menu."
-      );
+      return header({ ...alunoAtual, ativo: false }, ultimoPedido, pratoAtual) + "Cadastro *pausado*.";
     }
 
-    if (n === "cadastrar") {
-      return (
-        header(alunoAtual, ultimoPedido) +
-        "Seu número já está *cadastrado* no sistema de almoço do IFSP Pirituba.\n\n" +
-        "Envie *Ajuda* para ver o menu de comandos."
-      );
-    }
-
-    return (
-      header(alunoAtual, ultimoPedido) +
-      "Não entendi sua mensagem.\n\n" +
-      "Envie *Ajuda* pra ver o menu de opções do assistente de almoço do IFSP Pirituba."
-    );
+    return header(alunoAtual, ultimoPedido, pratoAtual) + "Não entendi. Envie *Ajuda*.";
   }
 
   async function close() {
