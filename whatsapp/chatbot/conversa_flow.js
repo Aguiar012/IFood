@@ -4,7 +4,7 @@ import { Pool } from "pg";
 import nodemailer from "nodemailer";
 
 function onlyDigits(s = "") { return (s || "").replace(/\D/g, ""); }
-// Extrai apenas os números para usar como chave estável
+// Extrai apenas os números para usar como chave estável (ignora @s.whatsapp.net ou @lid)
 function jidToPhone(jid = "") { return onlyDigits(String(jid).split("@")[0]); }
 function strip(s = "") { return String(s || "").trim(); }
 function norm(s = "") {
@@ -12,6 +12,12 @@ function norm(s = "") {
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
+}
+
+// Função para formatar texto como Título (ex: "FILÉ DE FRANGO" -> "Filé De Frango")
+function toTitleCase(str) {
+  if (!str) return "";
+  return str.toLowerCase().replace(/(?:^|\s|["'([{])+\S/g, match => match.toUpperCase());
 }
 
 // ---- dias da semana ----
@@ -47,6 +53,7 @@ function ddmm(d) {
 }
 
 function isoDateUTC(d) {
+  // YYYY-MM-DD, usado só para comparar "mesmo dia alvo" no state
   return new Date(d).toISOString().slice(0, 10);
 }
 
@@ -62,8 +69,12 @@ function cutoff1315(dt) {
   return x;
 }
 
+// Lógica de Cancelamento Ajustada para Fim de Semana
 function diaCancelamentoAlvo(now = new Date()) {
+  // 1. Regra base: <= 13:15 é hoje, > 13:15 é amanhã
   let target = (now <= cutoff1315(now)) ? now : addDays(now, 1);
+
+  // 2. Se cair Sábado (6) ou Domingo (0), avança até Segunda (1)
   while (target.getDay() === 0 || target.getDay() === 6) {
     target = addDays(target, 1);
   }
@@ -152,7 +163,9 @@ function header(aluno, ultimoPedido, pratoAtual) {
   let linhaPrato = "Prato Atual: informação indisponível.";
   if (pratoAtual && pratoAtual.prato_nome) {
     const dataPrato = formatDiaBR(pratoAtual.dia_referente);
-    linhaPrato = `Prato Atual: ${pratoAtual.prato_nome} (Almoço de ${dataPrato})`;
+    // Normaliza o nome do prato para Título (ex: Filé De Frango)
+    const pratoFormatado = toTitleCase(pratoAtual.prato_nome);
+    linhaPrato = `Prato Atual: ${pratoFormatado} (Almoço de ${dataPrato})`;
   }
 
   return (
@@ -344,6 +357,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return rows.map(r => r.nome);
   }
 
+  // [CORREÇÃO 1] Adicionado filtro para ignorar "anteriormente" (redundância) e "Erros de Finais de Semana"
   async function getUltimoPedido(c, alunoId) {
     const { rows } = await c.query(
       `SELECT dia_pedido, motivo FROM pedido
@@ -353,6 +367,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return rows[0] || null;
   }
 
+  // [CORREÇÃO 1] Adicionado filtro para ignorar "anteriormente" no histórico também
   async function getUltimosPedidos(c, alunoId) {
     const { rows } = await c.query(
       `SELECT dia_pedido, motivo FROM pedido
@@ -363,7 +378,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     return rows;
   }
 
-  // === NOVA FUNÇÃO: PEGAR PRATO ATUAL (Do Banco) ===
+  // === FUNÇÃO: PEGAR PRATO ATUAL (Do Banco) ===
   async function getPratoAtual(c) {
     // Pega o registro mais recente que foi atualizado no banco
     // A tabela é 'proximo_prato' (dia_referente, prato_nome, updated_at)
@@ -599,6 +614,10 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     if (n === "desativar" || n === "pausar") {
       await withConn(c => setAtivo(c, alunoAtual.id, false));
       return header({ ...alunoAtual, ativo: false }, ultimoPedido, pratoAtual) + "Cadastro *pausado*.";
+    }
+
+    if (n === "cadastrar") {
+      return header(alunoAtual, ultimoPedido, pratoAtual) + "Seu número já está cadastrado. Envie *Ajuda*.";
     }
 
     return header(alunoAtual, ultimoPedido, pratoAtual) + "Não entendi. Envie *Ajuda*.";
