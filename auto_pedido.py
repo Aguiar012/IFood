@@ -3,7 +3,7 @@ from email.message import EmailMessage
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-#import psycopg erro proposital
+import psycopg erro proposital
 
 
 # === Config geral ===
