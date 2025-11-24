@@ -215,10 +215,21 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
 // --- helper para envio de e-mail de cancelamento ---
   async function sendCancelEmail({ aluno, alvoDate, phone }) {
-    if (!mailTransporter || !CAE_EMAIL) {
-      logger.error("E-mail de cancelamento não configurado.");
-      return { ok: false, reason: "NO_TRANSPORT" };
+    // Recarrega variáveis para garantir que pegou a última config
+    const user = process.env.GMAIL_USER;
+    const pass = process.env.GMAIL_APP_PASSWORD;
+    const to = process.env.CAE_EMAIL || user;
+
+    if (!user || !pass) {
+      logger.error("Credenciais de e-mail ausentes no ENV.");
+      return { ok: false, reason: "SEM_CREDENCIAIS", error: "GMAIL_USER ou PASS vazios" };
     }
+
+    // Cria transportador novo a cada envio para garantir config atualizada
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: { user, pass },
+    });
 
     const dataStr = ddmm(alvoDate);
     const diaSemana = DIA_LONGO[alvoDate.getDay()];
@@ -249,19 +260,23 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     const text = `Solicitação de cancelamento:\nAluno: ${nome}\nProntuário: ${prontNumerico}\nData: ${dataStr}`;
 
     try {
-      await mailTransporter.sendMail({
-        from: `"Assistente de Almoço IFSP Pirituba" <${GMAIL_USER}>`,
-        to: CAE_EMAIL,
+      await transporter.sendMail({
+        from: `"Assistente de Almoço" <${user}>`,
+        to,
         subject,
         text,
         html,
       });
       return { ok: true };
     } catch (err) {
-      logger.error("Erro ao enviar e-mail:", err);
-      return { ok: false, reason: "SMTP_ERROR", error: String(err) };
+      const erroStr = String(err);
+      logger.error("Erro detalhado do Nodemailer:", erroStr);
+      // Retorna o erro técnico para ser exibido no WhatsApp
+      return { ok: false, reason: "SMTP_ERROR", error: erroStr };
     }
   }
+  
+
 
   // --------- DB ----------
   if (!dbUrl) throw new Error("DATABASE_URL vazio. Defina env DATABASE_URL.");
@@ -572,8 +587,14 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         if (u.lastCancelDate === alvoIso) {
           return header(alunoAtual, ultimoPedido, pratoAtual) + "*Já existe pedido de cancelamento para este dia.*";
         }
+        
         const resEmail = await sendCancelEmail({ aluno: alunoAtual, alvoDate: d, phone });
-        if (!resEmail.ok) return header(alunoAtual, ultimoPedido, pratoAtual) + "Erro ao enviar e-mail.";
+
+        if (!resEmail.ok) {
+            // Agora mostra o erro técnico no chat
+            return header(alunoAtual, ultimoPedido, pratoAtual) + 
+                   `Erro ao enviar e-mail: ${resEmail.error || "Erro desconhecido"}`;
+        }
         
         setUser(userKey, { step: "MAIN", temp: {}, lastCancelDate: alvoIso });
         return header(alunoAtual, ultimoPedido, pratoAtual) + `*Cancelamento enviado para ${alvo}.*`;
