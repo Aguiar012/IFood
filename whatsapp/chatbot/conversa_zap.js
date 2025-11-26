@@ -80,14 +80,16 @@ async function startWA() {
             },
             logger,
             printQRInTerminal: false,
-            browser: ["Ubuntu", "Chrome", "22.0.0"],
+            browser: ["Ubuntu", "Chrome", "120.0.0"],
             agent, 
             fetchAgent: agent,
             connectTimeoutMs: 60_000,
             keepAliveIntervalMs: 15_000,
             defaultQueryTimeoutMs: 60_000,
-            retryRequestDelayMs: 2000,
+            retryRequestDelayMs: 5000,
             // syncFullHistory: false, // Opcional: Descomente se quiser boot instantâneo sem histórico antigo
+            syncFullHistory: false,
+            generateHighQualityLinkPreview: true,
             shouldIgnoreJid: jid => isJidBroadcast(jid) || isJidNewsletter(jid),
         });
 
