@@ -31,7 +31,7 @@ apps: [
       NODE_TLS_REJECT_UNAUTHORIZED: "0",
       GMAIL_USER: "if.food.automatizacao@gmail.com", // <Coloque seu email real
       GMAIL_APP_PASSWORD: "rtqg sqvf avoy okba", // <Coloque sua senha de app
-      CAE_EMAIL: "aguiartiago012@gmail.com"   // <Opcional
+      CAE_EMAIL: "cae.ptb@ifsp.edu.br"   // <Opcional
       }
   }
 ]
