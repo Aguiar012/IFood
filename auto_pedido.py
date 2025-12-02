@@ -84,6 +84,23 @@ def notify_admins(message):
             logging.error(f"Falha de conexão ao notificar {admin}: {e}")
 
 # --------------------------- Dados ---------------------------------
+
+def checar_cancelamento_direto(aluno_id: int, dia_pedido) -> bool:
+    """Verifica se o aluno cancelou diretamente (sem e-mail) para o dia alvo."""
+    if not DATABASE_URL:
+        return False
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            # Busca por qualquer registro de pedido que comece com a tag de cancelamento direto
+            cur.execute("""
+                select 1
+                  from pedido
+                 where aluno_id = %s
+                   and dia_pedido = %s
+                   and motivo like 'CANCELADO_DIRETAMENTE%%';
+            """, (aluno_id, dia_pedido))
+            return cur.fetchone() is not None
+          
 def load_alunos_para_dia(target_dow: int):
     if not DATABASE_URL:
         raise RuntimeError("Faltou DATABASE_URL")
@@ -290,6 +307,20 @@ def main():
     for aluno in alunos:
         aluno_id = aluno['id']
         pront    = aluno['prontuario']
+      
+        # [NOVO] 1. Checa se o aluno cancelou diretamente pelo bot (cancelamento de última hora)
+        if checar_cancelamento_direto(aluno_id, target_date_pedido):
+            inicio = datetime.now(TZ).strftime('%H:%M:%S')
+            time.sleep(random.randint(0, JITTER_MAX))
+            fim = datetime.now(TZ).strftime('%H:%M:%S')
+            motivo = 'NAO_PEDIU: CANCELADO_DIRETAMENTE pelo Bot.'
+            logging.info(f"PULOU: {pront} cancelou diretamente. Motivo: {motivo}")
+            
+            # Adiciona ao relatório (assume sucesso, pois a ação de pedido foi impedida)
+            detalhes.append((pront, True, motivo, inicio, fim, 0))
+            
+            # Pula o restante do loop para este aluno
+            continue
         
         bloqueios = get_bloqueios_por_prontuario(pront)
         skip, hits = should_skip(prato_do_dia_texto, bloqueios)
