@@ -138,19 +138,29 @@ async function startWA() {
   logger.info({ version }, "Baileys version");
   const agent = await buildProxyAgent(PROXY_URL);
 
+
   sock = makeWASocket({
     version,
     auth: state,
     logger,
-    browser: ['IFood Avisos', 'Chrome', '120.0.0'], // Browser fixo
+    // [AJUSTE 1] Garanta que o navegador seja recente.
+    browser: ['IFood Avisos', 'Chrome', '120.0.0'], 
     agent,
     fetchAgent: agent,
     markOnlineOnConnect: false,
-    syncFullHistory: false,
+    // [AJUSTE 2] CRUCIAL: Impede o download do histórico massivo
+    syncFullHistory: false, 
     shouldIgnoreJid: jid => String(jid).endsWith("@newsletter"),
-    keepAliveIntervalMs: 30_000,
-    connectTimeoutMs: 60_000
+    // [AJUSTE 3] Aumentar timeouts para lidar com lentidão da rede
+    keepAliveIntervalMs: 20_000, // Intervalo um pouco menor, mais ativo
+    connectTimeoutMs: 90_000, // Dá mais tempo para conectar (90s)
+    defaultQueryTimeoutMs: 90_000, // Dá mais tempo para o WhatsApp responder
+    retryRequestDelayMs: 5000, // Espera mais tempo entre tentativas
+    // Novo: Otimiza o Baileys para conexões leves
+    getMessage: async (key) => ({}), // Melhora a performance ao ignorar buscas profundas de mensagens
+    // ...
   });
+
 
   sock.ev.on("creds.update", saveCreds);
 
