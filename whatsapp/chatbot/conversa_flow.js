@@ -108,7 +108,7 @@ function cutoff1315(dt) {
 }
 
 // Lógica que pega o próximo dia útil a partir de hoje/amanhã
-function getProximoDiaPreferido(now = new Date(), diasPreferidos = []) {
+function getProximoDiaPreferido(now = new Date(), diasPreferidos = [], lastCanceledDateIso = null) {
   const cutoff = cutoff1315(now);
   let target = (now <= cutoff) ? now : addDays(now, 1);
 
@@ -123,12 +123,19 @@ function getProximoDiaPreferido(now = new Date(), diasPreferidos = []) {
       continue;
     }
 
-    // 2. Se a lista de preferências estiver vazia OU o dia alvo estiver na lista, é um dia válido
+    // [NOVO] 2. Pula se a data for a mesma que o último cancelamento bem-sucedido.
+    if (lastCanceledDateIso && isoDateUTC(target) === lastCanceledDateIso) {
+        target = addDays(target, 1);
+        maxDays--;
+        continue;
+    }
+
+    // 3. Se a lista de preferências estiver vazia OU o dia alvo estiver na lista, é um dia válido
     if (diasPreferidos.length === 0 || diasPreferidos.includes(targetDayOfWeek)) {
       return target;
     }
 
-    // 3. Dia alvo não é preferido, avança para o próximo dia
+    // 4. Dia alvo não é preferido, avança para o próximo dia
     target = addDays(target, 1);
     maxDays--;
   }
@@ -777,8 +784,14 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           alvoDate = getDateForNextTargetDay(targetDayNumber);
           
       // B) Modo Automático (se não digitou dia ou só digitou "cancelar")
+      // Localize este trecho (perto da linha 620):
+      // } else if (n.startsWith("cancelar") || n.includes("nao vou")) {
+      //           alvoDate = getProximoDiaPreferido(new Date(), diasPreferidos); // LINHA ANTIGA AQUI
+      
+      // Substitua APENAS essa linha pela nova:
       } else if (n.startsWith("cancelar") || n.includes("nao vou")) {
-          alvoDate = getProximoDiaPreferido(new Date(), diasPreferidos);
+          // [MODIFICADO] Passa a data do último cancelamento para a função pular esse dia.
+          alvoDate = getProximoDiaPreferido(new Date(), diasPreferidos, u.lastCancelDate);
           targetDayNumber = alvoDate.getDay();
       } else {
           // Input inválido (não é dia nem "cancelar" na etapa ASK_CANCEL_DAY_AGAIN)
