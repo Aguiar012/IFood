@@ -800,11 +800,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           // Modo automático: pega próximo dia preferido
           alvoDate = getProximoDiaPreferido(new Date(), diasPreferidosNums, u.lastCancelDate);
           targetDayNumber = alvoDate.getDay();
-      } else {
-          // Input inválido (não é dia nem "cancelar" na etapa ASK_CANCEL_DAY_AGAIN)
-          setUser(userKey, { step: "MAIN", temp: {} });
-          return header(alunoAtual, ultimoPedido, pratoAtual) + "Opção inválida. Envie *Ajuda* para ver o menu.";
       }
+
       
       const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
       const alvoIso = isoDateUTC(alvoDate);
