@@ -363,6 +363,18 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     idleTimeoutMillis: 30_000
   });
 
+  async function isDiaJaCancelado(c, alunoId, alvoDate) {
+    const alvoIso = isoDateUTC(alvoDate);
+    const { rows } = await c.query(
+      `SELECT 1 FROM pedido 
+         WHERE aluno_id = $1 AND dia_pedido = $2
+           AND motivo ILIKE '%cancelamento%'
+         LIMIT 1`,
+      [alunoId, alvoIso]
+    );
+    return rows.length > 0;
+  }
+
   async function withConn(fn) {
     const c = await pool.connect();
     try { return await fn(c); } finally { c.release(); }
@@ -802,8 +814,16 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
       const alvoIso = isoDateUTC(alvoDate);
 
-      // Checagem de duplicação
-      if (u.lastCancelDate === alvoIso) return header(alunoAtual, ultimoPedido, pratoAtual) + `*Já existe cancelamento para ${alvo}.*`;
+      // Checagem de duplicação (Baseada no Banco de Dados)
+      const jaCancelouDB = await withConn(c => isDiaJaCancelado(c, alunoAtual.id, alvoDate));
+
+      if (jaCancelouDB) {
+          setUser(userKey, { step: "MAIN", temp: {} }); // Reseta o estado
+          return header(alunoAtual, ultimoPedido, pratoAtual) + `*O dia ${alvo} já está registrado como cancelado.*`;
+      }
+      
+      // O short-term lock (u.lastCancelDate) NÃO DEVE SER USADO AQUI, pois está impedindo o fluxo de seleção de dia.
+      // Vamos removê-lo completamente, já que o DB agora faz o trabalho.
       
       // Checagem do método de cancelamento
       const pedidoJaRegistrado = await withConn(c => hasPedidoRegistrado(c, alunoAtual.id, alvoDate));
