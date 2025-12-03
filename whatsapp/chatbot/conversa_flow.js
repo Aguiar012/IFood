@@ -335,15 +335,23 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
 
   // NOVO: Registra o cancelamento de última hora no histórico (motivo 'CANCELADO_DIRETAMENTE')
   async function registrarCancelamentoDireto(c, alunoId, alvoDate, motivo) {
-    const alvoIso = isoDateUTC(alvoDate);
-    // Insere o registro de "Não Pediu" com o motivo específico.
-    await c.query(
-      `INSERT INTO pedido (aluno_id, dia_pedido, motivo)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (aluno_id, dia_pedido)
-      DO UPDATE SET motivo = $3`, // Atualiza se já existir um registro (ex: erro_pedido)
-      [alunoId, alvoIso, motivo]
-    );
+      const alvoIso = isoDateUTC(alvoDate);
+  
+      // 1. Tenta ATUALIZAR (UPDATE) o registro existente.
+      // Isso cobre casos onde o auto_pedido já inseriu um PEDIU_OK ou ERRO_PEDIDO.
+      const updateResult = await c.query(
+        `UPDATE pedido SET motivo = $3 WHERE aluno_id = $1 AND dia_pedido = $2`,
+        [alunoId, alvoIso, motivo]
+      );
+  
+      // 2. Se NENHUMA linha foi atualizada (o registro não existia para o dia/aluno),
+      // FAZ o INSERT do cancelamento como um registro novo.
+      if (updateResult.rowCount === 0) {
+        await c.query(
+          `INSERT INTO pedido (aluno_id, dia_pedido, motivo) VALUES ($1, $2, $3)`,
+          [alunoId, alvoIso, motivo]
+        );
+      }
   }
 
   async function findAlunoByTelefone(c, telefone) {
