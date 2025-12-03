@@ -23,6 +23,7 @@ function toTitleCase(str) {
 // ---- dias da semana ----
 const DIAS_SEMANA = ["Domingo", "Segunda-Feira", "Terça-Feira", "Quarta-Feira", "Quinta-Feira", "Sexta-Feira", "Sábado"];
 
+
 function parseDiasLista(txt = "") {
   const map = {
     "seg": 1, "segunda": 1, "segunda-feira": 1,
@@ -40,6 +41,43 @@ function parseDiasLista(txt = "") {
 function diasHumanos(dias = []) {
   const mapInv = { 1: "Seg", 2: "Ter", 3: "Qua", 4: "Qui", 5: "Sex", 6: "Sáb", 7: "Dom" };
   return (dias || []).map(d => mapInv[d] || d).join(", ");
+}
+
+
+function getDiaNumero(text) {
+    const n = norm(text);
+    const map = {
+        "seg": 1, "segunda": 1, "segunda-feira": 1,
+        "ter": 2, "terca": 2, "terça": 2, "terça-feira": 2,
+        "qua": 3, "quarta": 3, "quarta-feira": 3,
+        "qui": 4, "quinta": 4, "quinta-feira": 4,
+        "sex": 5, "sexta": 5, "sexta-feira": 5,
+    };
+    return map[n] || null;
+}
+
+// Adicionar esta função perto de getDiaNumero
+// Retorna a próxima data válida para um dia da semana específico (1=Seg a 5=Sex), 
+// considerando o cutoff de hoje.
+function getDateForNextTargetDay(targetDayOfWeek) {
+    const now = new Date();
+    const d = new Date(now);
+    
+    const targetTime = cutoff1315(now).getTime();
+
+    let currentDay = d.getDay(); // 0 (Dom) a 6 (Sat)
+    let daysToAdd = (targetDayOfWeek - currentDay + 7) % 7;
+
+    // Se a data cair hoje (daysToAdd === 0), verifica se o cutoff já passou.
+    if (daysToAdd === 0 && now.getTime() >= targetTime) {
+        daysToAdd = 7; // Se já passou, pula para a próxima semana.
+    } else if (daysToAdd === 0 && now.getTime() < targetTime) {
+        // Se a data cai hoje E o cutoff não passou, usa hoje. (daysToAdd = 0, implicitamente)
+    }
+    
+    d.setDate(d.getDate() + daysToAdd);
+    
+    return d;
 }
 
 // ---- datas / cutoff 13:15 ----
@@ -641,14 +679,35 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       return header(alunoAtual, ultimoPedido, pratoAtual) + `*Bloqueios salvos:* ${itens.join(", ")}.`;
     }
     if (u.step === "CONFIRM_CANCEL") {
+      // --- NOVO: LÓGICA DE ESCOLHA DE OUTRO DIA ---
+      const novoDiaNum = getDiaNumero(n);
+      if (novoDiaNum) {
+            const diasPreferidos = await withConn(c => getPreferenciasDias(c, alunoAtual.id));
+
+            if (diasPreferidos.includes(novoDiaNum)) {
+                // Se o input é um dia preferido, reinicia o fluxo para esse dia.
+                setUser(userKey, { step: "ASK_CANCEL_DAY_AGAIN", temp: {} });
+                return handleText(jid, `cancelar ${n}`); // Chamada recursiva com o novo dia
+            } else {
+                // Se não é um dia preferido, avisa.
+                return header(alunoAtual, ultimoPedido, pratoAtual) + 
+                       `Você só pode cancelar dias que estão cadastrados nas suas *Preferências* (${diasHumanos(diasPreferidos)}). Responda *Sim* ou *Não* para o dia proposto.`;
+            }
+      }
+
+      
       const d = new Date(u.temp?.cancelDate || new Date());
       const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
       const alvoIso = isoDateUTC(d);
       const metodo = u.temp?.metodo || "EMAIL";
+
+      
       
       if (u.lastCancelDate === alvoIso) {
           return header(alunoAtual, ultimoPedido, pratoAtual) + "*Já existe pedido de cancelamento para este dia.*";
       }
+
+      
 
       if (["sim", "s", "ok", "yes", "confirmar"].includes(n)) {
         
@@ -685,41 +744,81 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
           return header(alunoAtual, ultimoPedido, pratoAtual) + `Confirma cancelar o almoço de *${alvo}* via e-mail? (Sim/Não)`;
       }
     }
-    if (n.startsWith("cancelar") || n.includes("nao vou")) {
-          // 1. Pega as preferências para usar na nova lógica de data.
-          const diasPreferidos = await withConn(c => getPreferenciasDias(c, alunoAtual.id));
-    
-          // 2. Determina o dia alvo inteligente (próximo dia útil E preferido)
-          const alvoDate = getProximoDiaPreferido(new Date(), diasPreferidos);
-          const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
-          const alvoIso = isoDateUTC(alvoDate);
-          
-          if (u.lastCancelDate === alvoIso) return header(alunoAtual, ultimoPedido, pratoAtual) + "*Já existe cancelamento para este dia.*";
-    
-          // 3. Verifica se o pedido JÁ FOI REGISTRADO para o dia alvo (Critério de Corte)
-          const pedidoJaRegistrado = await withConn(c => hasPedidoRegistrado(c, alunoAtual.id, alvoDate));
-          const isPastCutoff = alvoDate.getTime() < cutoff1315(alvoDate).getTime();
-    
-          let metodo = "";
-          if (isPastCutoff && pedidoJaRegistrado) {
-            // Se já passou do cutoff e o pedido está no banco, usamos o cancelamento direto.
-            // O auto_pedido deve ser ajustado para pular este dia se encontrar o motivo "CANCELADO_DIRETAMENTE".
-            metodo = "DIRETO";
-          } else {
-            // Se ainda está no prazo ou se o pedido ainda não foi registrado (regra anterior), envia e-mail.
-            metodo = "EMAIL";
+    // --- LÓGICA DE CANCELAMENTO CENTRALIZADA (NOVA) ---
+    // A condição de entrada agora inclui o estado de re-pergunta
+    if (n.startsWith("cancelar") || n.includes("nao vou") || u.step === "ASK_CANCEL_DAY_AGAIN") {
+      let targetDayNumber = null;
+      let alvoDate = null;
+      let inputDayName = null;
+
+      // 1. Tenta identificar se o usuário pediu um dia específico
+      const parts = n.split(/\s+/).map(norm).filter(Boolean);
+      // Checa se o comando inicial foi "cancelar [dia]" OU se é a resposta na etapa ASK_CANCEL_DAY_AGAIN
+      if (parts.length > 1 && parts[0].includes("cancelar")) {
+          targetDayNumber = getDiaNumero(parts[1]);
+          inputDayName = parts[1];
+      } else if (u.step === "ASK_CANCEL_DAY_AGAIN") {
+          targetDayNumber = getDiaNumero(text);
+          inputDayName = text;
+      }
+      
+      // Pega dias de preferência do aluno (usado para validar input e modo automático)
+      const diasPreferidos = await withConn(c => getPreferenciasDias(c, alunoAtual.id));
+      const diasPreferidosNums = diasPreferidos.length > 0 ? diasPreferidos : [1, 2, 3, 4, 5]; // Default Mon-Fri
+
+      // A) Usuário pediu um dia específico (válido ou inválido)
+      if (targetDayNumber) {
+          if (!diasPreferidosNums.includes(targetDayNumber)) {
+             // O dia digitado não está entre os dias que ele come.
+             setUser(userKey, { step: "MAIN", temp: {} });
+             return header(alunoAtual, ultimoPedido, pratoAtual) + 
+                    `O dia ${toTitleCase(inputDayName)} não está cadastrado como seu dia de almoço (${diasHumanos(diasPreferidos)}). Envie *Preferência* para mudar.`;
           }
+          alvoDate = getDateForNextTargetDay(targetDayNumber);
           
-          // Armazena o método escolhido na sessão temporária
-          setUser(userKey, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate, metodo: metodo } });
-          
-          if (metodo === "DIRETO") {
-            return header(alunoAtual, ultimoPedido, pratoAtual) + 
-                   `Deseja CANCELAR diretamente (sem e-mail) o almoço de *${alvo}*? Responda *Sim*.`;
-          } else {
-            return header(alunoAtual, ultimoPedido, pratoAtual) + 
-                   `Deseja cancelar o almoço de *${alvo}* via e-mail para a CAE? Responda *Sim*.`;
-          }
+      // B) Modo Automático (se não digitou dia ou só digitou "cancelar")
+      } else if (n.startsWith("cancelar") || n.includes("nao vou")) {
+          alvoDate = getProximoDiaPreferido(new Date(), diasPreferidos);
+          targetDayNumber = alvoDate.getDay();
+      } else {
+          // Input inválido (não é dia nem "cancelar" na etapa ASK_CANCEL_DAY_AGAIN)
+          setUser(userKey, { step: "MAIN", temp: {} });
+          return header(alunoAtual, ultimoPedido, pratoAtual) + "Opção inválida. Envie *Ajuda* para ver o menu.";
+      }
+      
+      const alvo = `${DIA_LONGO[alvoDate.getDay()]} ${ddmm(alvoDate)}`;
+      const alvoIso = isoDateUTC(alvoDate);
+
+      // Checagem de duplicação
+      if (u.lastCancelDate === alvoIso) return header(alunoAtual, ultimoPedido, pratoAtual) + `*Já existe cancelamento para ${alvo}.*`;
+      
+      // Checagem do método de cancelamento
+      const pedidoJaRegistrado = await withConn(c => hasPedidoRegistrado(c, alunoAtual.id, alvoDate));
+      const isPastCutoff = new Date().getTime() >= cutoff1315(alvoDate).getTime();
+
+      let metodo = "EMAIL";
+      if (pedidoJaRegistrado && isPastCutoff) {
+          metodo = "DIRETO";
+      }
+
+      // Prepara a lista de dias para a mensagem de confirmação
+      const diasRestantesTexto = diasPreferidosNums
+          .filter(d => d !== targetDayNumber && d !== 0 && d !== 6) // Exclui o dia alvo e fins de semana
+          .map(d => DIA_LONGO[d].slice(0, 3));
+      const diasOpcoes = diasRestantesTexto.length > 0 
+          ? ` (Ou envie *${diasRestantesTexto.join('*, *')}* para outro dia)` 
+          : "";
+
+      // Armazena o estado e pergunta
+      setUser(userKey, { step: "CONFIRM_CANCEL", temp: { cancelDate: alvoDate, metodo: metodo, targetDayNumber: targetDayNumber } });
+      
+      if (metodo === "DIRETO") {
+          return header(alunoAtual, ultimoPedido, pratoAtual) + 
+                 `Deseja CANCELAR DIRETAMENTE (sem e-mail) o almoço de *${alvo}*? Responda *Sim*.${diasOpcoes}`;
+      } else {
+          return header(alunoAtual, ultimoPedido, pratoAtual) + 
+                 `Deseja cancelar o almoço de *${alvo}* via e-mail para a CAE? Responda *Sim*.${diasOpcoes}`;
+      }
     }
 
     if (n.startsWith("preferencia") || n === "dias") {
