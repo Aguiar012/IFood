@@ -703,9 +703,10 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       if (novoDiaNum) {
             const diasPreferidos = await withConn(c => getPreferenciasDias(c, alunoAtual.id));
 
+
             if (diasPreferidos.includes(novoDiaNum)) {
                 // Se o input é um dia preferido, reinicia o fluxo para esse dia.
-                setUser(userKey, { step: "ASK_CANCEL_DAY_AGAIN", temp: {} });
+                // Não precisa de ASK_CANCEL_DAY_AGAIN, pois o handleText vai resolver.
                 return handleText(jid, `cancelar ${n}`); // Chamada recursiva com o novo dia
             } else {
                 // Se não é um dia preferido, avisa.
@@ -765,7 +766,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     }
     // --- LÓGICA DE CANCELAMENTO CENTRALIZADA (NOVA) ---
     // A condição de entrada agora inclui o estado de re-pergunta
-    if (n.startsWith("cancelar") || n.includes("nao vou") || u.step === "ASK_CANCEL_DAY_AGAIN") {
+    if (n.startsWith("cancelar") || n.includes("nao vou")) {
       let targetDayNumber = null;
       let alvoDate = null;
       let inputDayName = null;
@@ -830,9 +831,18 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       const isPastCutoff = new Date().getTime() >= cutoff1315(alvoDate).getTime();
 
       let metodo = "EMAIL";
+      
+      // Condição 1: Prioriza o cancelamento Direto (para pedidos que JÁ foram feitos, mas ainda dá tempo de interceptar)
       if (pedidoJaRegistrado && isPastCutoff) {
           metodo = "DIRETO";
+      } else if (pedidoJaRegistrado && !isPastCutoff) {
+          // Condição 2: Pedido já registrado, mas AINDA NÃO PASSOU DO CUTOFF (não deve acontecer com pedidos normais)
+          // Força E-mail para notificar a CAE antes que o SICA feche, se houver margem.
+          metodo = "EMAIL"; 
       }
+      
+      // Condição 3 (implícita): Se o pedido NÃO FOI REGISTRADO (mais comum para amanhã), 
+      // o método permanece "EMAIL" (padrão), pois precisamos avisar a CAE.
 
       // Prepara a lista de dias para a mensagem de confirmação
       const diasRestantesTexto = diasPreferidosNums
