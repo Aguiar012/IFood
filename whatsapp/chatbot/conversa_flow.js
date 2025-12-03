@@ -61,23 +61,23 @@ function getDiaNumero(text) {
 // considerando o cutoff de hoje.
 function getDateForNextTargetDay(targetDayOfWeek) {
     const now = new Date();
-    const d = new Date(now);
+    const cutoffTime = cutoff1315(now);
     
-    const targetTime = cutoff1315(now).getTime();
-
-    let currentDay = d.getDay(); // 0 (Dom) a 6 (Sat)
+    let currentDay = now.getDay(); // 0 (Dom) a 6 (Sáb)
     let daysToAdd = (targetDayOfWeek - currentDay + 7) % 7;
 
     // Se a data cair hoje (daysToAdd === 0), verifica se o cutoff já passou.
-    if (daysToAdd === 0 && now.getTime() >= targetTime) {
-        daysToAdd = 7; // Se já passou, pula para a próxima semana.
-    } else if (daysToAdd === 0 && now.getTime() < targetTime) {
-        // Se a data cai hoje E o cutoff não passou, usa hoje. (daysToAdd = 0, implicitamente)
+    if (daysToAdd === 0) {
+        if (now.getTime() > cutoffTime.getTime()) {
+            daysToAdd = 7; // Se já passou do cutoff, vai para a próxima semana
+        }
+        // Se ainda não passou do cutoff, mantém daysToAdd = 0 (usa hoje)
     }
     
-    d.setDate(d.getDate() + daysToAdd);
+    const result = new Date(now);
+    result.setDate(result.getDate() + daysToAdd);
     
-    return d;
+    return result;
 }
 
 // ---- datas / cutoff 13:15 ----
@@ -698,38 +698,32 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       return header(alunoAtual, ultimoPedido, pratoAtual) + `*Bloqueios salvos:* ${itens.join(", ")}.`;
     }
     if (u.step === "CONFIRM_CANCEL") {
-      // --- NOVO: LÓGICA DE ESCOLHA DE OUTRO DIA ---
       const novoDiaNum = getDiaNumero(n);
       if (novoDiaNum) {
-            const diasPreferidos = await withConn(c => getPreferenciasDias(c, alunoAtual.id));
-
-
-            if (diasPreferidos.includes(novoDiaNum)) {
-                // Se o input é um dia preferido, reinicia o fluxo para esse dia.
-                // Não precisa de ASK_CANCEL_DAY_AGAIN, pois o handleText vai resolver.
-                return handleText(jid, `cancelar ${n}`); // Chamada recursiva com o novo dia
-            } else {
-                // Se não é um dia preferido, avisa.
-                return header(alunoAtual, ultimoPedido, pratoAtual) + 
-                       `Você só pode cancelar dias que estão cadastrados nas suas *Preferências* (${diasHumanos(diasPreferidos)}). Responda *Sim* ou *Não* para o dia proposto.`;
-            }
+        const diasPreferidos = await withConn(c => getPreferenciasDias(c, alunoAtual.id));
+    
+        if (diasPreferidos.includes(novoDiaNum)) {
+          return handleText(jid, `cancelar ${n}`);
+        } else {
+          return header(alunoAtual, ultimoPedido, pratoAtual) + 
+                 `Você só pode cancelar dias que estão cadastrados nas suas *Preferências* (${diasHumanos(diasPreferidos)}). Responda *Sim* ou *Não* para o dia proposto.`;
+        }
       }
-
       
       const d = new Date(u.temp?.cancelDate || new Date());
       const alvo = `${DIA_LONGO[d.getDay()]} ${ddmm(d)}`;
       const alvoIso = isoDateUTC(d);
       const metodo = u.temp?.metodo || "EMAIL";
-
-      
-      
-      if (u.lastCancelDate === alvoIso) {
-          return header(alunoAtual, ultimoPedido, pratoAtual) + "*Já existe pedido de cancelamento para este dia.*";
+    
+      // [MODIFICADO] Move a checagem para ANTES de confirmar
+      const jaCancelouDB = await withConn(c => isDiaJaCancelado(c, alunoAtual.id, d));
+      if (jaCancelouDB) {
+        setUser(userKey, { step: "MAIN", temp: {} });
+        return header(alunoAtual, ultimoPedido, pratoAtual) + `*O dia ${alvo} já está registrado como cancelado.*`;
       }
-
-      
-
+    
       if (["sim", "s", "ok", "yes", "confirmar"].includes(n)) {
+
         
         if (metodo === "DIRETO") {
             // Cancelamento DIRETO: Registra no banco para o auto_pedido ignorar.
@@ -802,9 +796,9 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       //           alvoDate = getProximoDiaPreferido(new Date(), diasPreferidos); // LINHA ANTIGA AQUI
       
       // Substitua APENAS essa linha pela nova:
-      } else if (n.startsWith("cancelar") || n.includes("nao vou")) {
-          // [MODIFICADO] Passa a data do último cancelamento para a função pular esse dia.
-          alvoDate = getProximoDiaPreferido(new Date(), diasPreferidos, u.lastCancelDate);
+      } else {
+          // Modo automático: pega próximo dia preferido
+          alvoDate = getProximoDiaPreferido(new Date(), diasPreferidosNums, u.lastCancelDate);
           targetDayNumber = alvoDate.getDay();
       } else {
           // Input inválido (não é dia nem "cancelar" na etapa ASK_CANCEL_DAY_AGAIN)
