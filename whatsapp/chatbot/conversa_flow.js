@@ -342,7 +342,8 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
         text,
         html,
       });
-      return { ok: true };
+      return { ok: true, alvoDate }; // Retorna a data para registrar depois
+
     } catch (err) {
       const erroStr = String(err);
       logger.error("Erro detalhado do Nodemailer:", erroStr);
@@ -368,7 +369,7 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
     const { rows } = await c.query(
       `SELECT 1 FROM pedido 
          WHERE aluno_id = $1 AND dia_pedido = $2
-           AND motivo ILIKE '%cancelamento%'
+           AND (motivo ILIKE '%cancelamento%' OR motivo ILIKE '%CANCELADO%')
          LIMIT 1`,
       [alunoId, alvoIso]
     );
@@ -698,15 +699,18 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
       return header(alunoAtual, ultimoPedido, pratoAtual) + `*Bloqueios salvos:* ${itens.join(", ")}.`;
     }
     if (u.step === "CONFIRM_CANCEL") {
-      const novoDiaNum = getDiaNumero(n);
-      if (novoDiaNum) {
-        const diasPreferidos = await withConn(c => getPreferenciasDias(c, alunoAtual.id));
-    
-        if (diasPreferidos.includes(novoDiaNum)) {
-          return handleText(jid, `cancelar ${n}`);
-        } else {
-          return header(alunoAtual, ultimoPedido, pratoAtual) + 
-                 `Você só pode cancelar dias que estão cadastrados nas suas *Preferências* (${diasHumanos(diasPreferidos)}). Responda *Sim* ou *Não* para o dia proposto.`;
+        const novoDiaNum = getDiaNumero(n);
+        if (novoDiaNum) {
+          const diasPreferidos = await withConn(c => getPreferenciasDias(c, alunoAtual.id));
+        
+          if (diasPreferidos.includes(novoDiaNum)) {
+            // Reseta o estado antes de processar novo cancelamento
+            setUser(userKey, { step: "MAIN", temp: {} });
+            return handleText(jid, `cancelar ${text}`); // Usa 'text' original, não 'n'
+          } else {
+
+            return header(alunoAtual, ultimoPedido, pratoAtual) + 
+                   `Você só pode cancelar dias que estão cadastrados nas suas *Preferências* (${diasHumanos(diasPreferidos)}). Responda *Sim* ou *Não* para o dia proposto.`;
         }
       }
       
@@ -732,15 +736,18 @@ export function createConversaFlow({ dataDir = "/app/data", dbUrl, logger = cons
             
             setUser(userKey, { step: "MAIN", temp: {}, lastCancelDate: alvoIso });
             return header(alunoAtual, ultimoPedido, pratoAtual) + `*Cancelamento DIRETO registrado para ${alvo}.*\nO robô de pedidos será avisado.`;
-
         } else {
-            // Cancelamento via EMAIL (método antigo)
+            // Cancelamento via EMAIL
             const resEmail = await sendCancelEmail({ aluno: alunoAtual, alvoDate: d, phone });
-    
+        
             if (!resEmail.ok) {
                 return header(alunoAtual, ultimoPedido, pratoAtual) + 
                        `Erro ao enviar e-mail: ${resEmail.error || "Erro desconhecido"}`;
             }
+            
+            // Registra no banco também para evitar duplicação
+            const motivo = `CANCELAMENTO_EMAIL: Enviado para CAE em ${new Date().toLocaleString('pt-BR')}`;
+            await withConn(c => registrarCancelamentoDireto(c, alunoAtual.id, d, motivo));
             
             setUser(userKey, { step: "MAIN", temp: {}, lastCancelDate: alvoIso });
             return header(alunoAtual, ultimoPedido, pratoAtual) + `*Cancelamento enviado para ${alvo}* via e-mail.`;
