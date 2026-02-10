@@ -1,0 +1,28 @@
+# Segredos e configuracoes locais
+.env
+.env.local
+
+# Dependencias
+node_modules/
+
+# Dados do bot (sessao WhatsApp, logs)
+dados_bot/
+
+# Sistema
+*.log
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Gemini agent
+.gemini/

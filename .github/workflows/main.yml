@@ -1,0 +1,59 @@
+name: AlmoPT
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 9 * * 1-5'
+    - cron: '0 17 * * 1-5'
+
+jobs:
+  almoco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install deps
+        run: pip install requests beautifulsoup4 psycopg[binary]
+
+      - name: Run AlmoPT
+        env:
+          EMAIL_USER:  ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS:  ${{ secrets.EMAIL_PASS }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT:   ${{ secrets.SMTP_PORT }}
+          TO_ADDRESS:  ${{ secrets.TO_ADDRESS }}
+          
+          # Configurações do Bot Próprio
+          BOT_URL:     ${{ secrets.BOT_URL }}
+          ADMINS_E164: ${{ secrets.ADMINS_E164 }}
+
+          DATABASE_URL: ${{ secrets.DATABASE_URL }} 
+        run: python -m sistema_pedido.iniciar_pedidos
+
+      - name: Notify admins on failure (Bot Próprio)
+        if: failure()
+        env:
+          BOT_URL:     ${{ secrets.BOT_URL }}
+          ADMINS_E164: ${{ secrets.ADMINS_E164 }}
+        run: |
+          # Verifica se tem URL configurada
+          if [ -z "$BOT_URL" ] || [ -z "$ADMINS_E164" ]; then
+            echo "BOT_URL ou ADMINS_E164 não configurados. Pulando alerta."
+            exit 0
+          fi
+
+          IFS=',' read -ra ADMINS <<< "$ADMINS_E164"
+          MSG="❌ Falha FATAL no GitHub Actions (script quebrou). Verifique os logs: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          
+          for A in "${ADMINS[@]}"; do
+            A="${A//[[:space:]]/}"
+            # Envia POST para o endpoint do seu bot
+            curl -sS -X POST "${BOT_URL}" \
+              -H "Content-Type: application/json" \
+              -d "{\"number\": \"$A\", \"message\": \"$MSG\"}"
+          done
