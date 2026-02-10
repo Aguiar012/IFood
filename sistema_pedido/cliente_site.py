@@ -53,17 +53,56 @@ def interpretar_resposta_pedido(html: str):
         
     return False, 'Não encontrei mensagem de confirmação no site.'
 
+def _extrair_prato_do_banner(banner):
+    """Extrai o nome do prato de um banner jumbotron."""
+    texto_banner = banner.get_text(" ", strip=True)
+    if "não cadastrado" in texto_banner.lower():
+        return "Cardápio não cadastrado"
+    
+    paragrafos = banner.find_all('p')
+    for p in paragrafos:
+        texto_p = p.get_text(" ", strip=True)
+        if "Prato Principal" in texto_p:
+            match_prato = re.search(r'Opção 1:\s*(.*?)(?:\s+Opção 2:|$)', texto_p, re.IGNORECASE)
+            if match_prato:
+                return match_prato.group(1).strip()
+            else:
+                return texto_p.replace("Prato Principal:", "").strip()
+    return "Prato não identificado no texto"
+
+
+def _buscar_banner_por_data(banners, data_alvo, meses):
+    """Procura um banner com a data especificada."""
+    for banner in banners:
+        tag_titulo = banner.find('h2', class_='display-3')
+        if not tag_titulo:
+            continue
+        texto_titulo = tag_titulo.get_text(" ", strip=True)
+        match = re.search(r'(\d{1,2})\s+de\s+([A-Za-zçÇ]+)\s+de\s+(\d{4})', texto_titulo, re.IGNORECASE)
+        if match:
+            d, nome_mes, y = match.groups()
+            mes_num = meses.get(nome_mes.capitalize())
+            if mes_num:
+                data_cardapio = datetime(int(y), mes_num, int(d)).date()
+                if data_cardapio == data_alvo:
+                    return banner
+    return None
+
+
 def buscar_cardapio_site(sessao):
     """
     Acessa o site, le o 'Jumbotron' (banner principal) e tenta descobrir o prato do dia.
     Também salva essa informação no banco de dados para o Bot usar.
+    Tenta a data alvo primeiro (amanha se apos corte), e faz fallback para hoje.
     """
     agora = datetime.now(FUSO_HORARIO)
     corte = agora.replace(hour=HORA_CORTE, minute=MINUTO_CORTE, second=0, microsecond=0)
 
-    # Lógica para decidir qual data buscar no banner
+    hoje = agora.date()
+    
+    # Decide a data principal para buscar
     if agora <= corte:
-        data_alvo = agora.date()
+        data_alvo = hoje
     else:
         data_alvo = (agora + timedelta(days=1)).date()
 
@@ -71,71 +110,46 @@ def buscar_cardapio_site(sessao):
     while data_alvo.isoweekday() in (6, 7):
         data_alvo += timedelta(days=1)
 
-    logging.info(f"🔎 Buscando cardápio no site para a data: {data_alvo}")
-    prato_encontrado = None
+    logging.info(f"Buscando cardapio no site para a data: {data_alvo}")
+
+    meses = {
+        'Janeiro': 1, 'Fevereiro': 2, 'Março': 3, 'Abril': 4, 'Maio': 5, 'Junho': 6,
+        'Julho': 7, 'Agosto': 8, 'Setembro': 9, 'Outubro': 10, 'Novembro': 11, 'Dezembro': 12
+    }
 
     try:
         resposta = sessao.get(URL_PRINCIPAL, timeout=TEMPO_TIMEOUT)
         resposta.raise_for_status()
         soup = BeautifulSoup(resposta.text, 'html.parser')
-
-        meses = {
-            'Janeiro': 1, 'Fevereiro': 2, 'Março': 3, 'Abril': 4, 'Maio': 5, 'Junho': 6,
-            'Julho': 7, 'Agosto': 8, 'Setembro': 9, 'Outubro': 10, 'Novembro': 11, 'Dezembro': 12
-        }
-
         todos_banners = soup.select('.jumbotron')
-        banner_alvo = None
 
-        # Procura qual banner tem a data que queremos
-        for banner in todos_banners:
-            tag_titulo = banner.find('h2', class_='display-3')
-            if not tag_titulo:
-                continue
-                
-            texto_titulo = tag_titulo.get_text(" ", strip=True)
-            # Regex para achar datas como "10 de Fevereiro de 2025"
-            match = re.search(r'(\d{1,2})\s+de\s+([A-Za-zçÇ]+)\s+de\s+(\d{4})', texto_titulo, re.IGNORECASE)
-            
-            if match:
-                d, nome_mes, y = match.groups()
-                mes_num = meses.get(nome_mes.capitalize())
-                if mes_num:
-                    data_cardapio = datetime(int(y), mes_num, int(d)).date()
-                    if data_cardapio == data_alvo:
-                        banner_alvo = banner
-                        break
-        
+        # 1. Tenta a data alvo principal
+        banner_alvo = _buscar_banner_por_data(todos_banners, data_alvo, meses)
+        prato_encontrado = None
+
         if banner_alvo:
-            texto_banner = banner_alvo.get_text(" ", strip=True)
-            if "não cadastrado" in texto_banner.lower():
-                prato_encontrado = "Cardápio não cadastrado"
-            else:
-                paragrafos = banner_alvo.find_all('p')
-                for p in paragrafos:
-                    texto_p = p.get_text(" ", strip=True)
-                    if "Prato Principal" in texto_p:
-                        # Tenta pegar só o nome do prato (Opção 1)
-                        match_prato = re.search(r'Opção 1:\s*(.*?)(?:\s+Opção 2:|$)', texto_p, re.IGNORECASE)
-                        if match_prato:
-                            prato_encontrado = match_prato.group(1).strip()
-                        else:
-                            prato_encontrado = texto_p.replace("Prato Principal:", "").strip()
-                        break
-                if not prato_encontrado:
-                    prato_encontrado = "Prato não identificado no texto"
+            prato_encontrado = _extrair_prato_do_banner(banner_alvo)
+            logging.info(f"Cardapio encontrado -> Dia: {data_alvo} | Prato: {prato_encontrado}")
+            atualizar_prato_dia(data_alvo, prato_encontrado)
         else:
-            prato_encontrado = "Data não encontrada no site"
+            logging.warning(f"Data {data_alvo} nao encontrada no site.")
+            atualizar_prato_dia(data_alvo, "Data não encontrada no site")
 
-        logging.info(f"🍽️ Cardápio atualizado no banco -> Dia: {data_alvo} | Prato: {prato_encontrado}")
-        
-        # Salva no banco para o Bot acessar
-        atualizar_prato_dia(data_alvo, prato_encontrado)
-            
-        return prato_encontrado
+        # 2. Fallback: se a data alvo nao e hoje, tenta tambem salvar o de hoje
+        if data_alvo != hoje and hoje.isoweekday() not in (6, 7):
+            banner_hoje = _buscar_banner_por_data(todos_banners, hoje, meses)
+            if banner_hoje:
+                prato_hoje = _extrair_prato_do_banner(banner_hoje)
+                logging.info(f"Cardapio de hoje tambem encontrado -> Dia: {hoje} | Prato: {prato_hoje}")
+                atualizar_prato_dia(hoje, prato_hoje)
+                # Se o alvo principal nao foi encontrado, usa o de hoje como referencia
+                if not prato_encontrado or "não" in prato_encontrado.lower():
+                    prato_encontrado = prato_hoje
+
+        return prato_encontrado or "(cardápio não disponível)"
 
     except Exception as e:
-        logging.error(f"❌ Erro ao ler cardápio do site: {e}")
+        logging.error(f"Erro ao ler cardapio do site: {e}")
         return "(erro na atualização)"
 
 def realizar_pedido(sessao, prontuario: str):

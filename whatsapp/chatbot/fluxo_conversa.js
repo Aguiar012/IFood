@@ -202,45 +202,95 @@ function classificarMotivo(motivoBruto = "") {
 }
 
 // ---- MENU PRINCIPAL ----
-function gerarCabecalho(aluno, ultimoPedido, pratoAtual) {
+
+// Calcula segunda-feira da semana atual (em horario local)
+function obterSegundaDaSemana(agora = new Date()) {
+    const d = new Date(agora);
+    const diaSemana = d.getDay(); // 0=Dom, 1=Seg, ..., 6=Sab
+    const diff = diaSemana === 0 ? -6 : 1 - diaSemana;
+    d.setDate(d.getDate() + diff);
+    d.setHours(0, 0, 0, 0);
+    return d;
+}
+
+function gerarCabecalho(aluno, pratoAtual, dadosSemana = null) {
     if (!aluno) {
         return "*IFSP Pirituba - Almoco*\n\n";
     }
 
     const nome = aluno.nome?.split(" ")[0] || "Aluno";
 
-    // Ultimo pedido com label claro
-    let linhaUltimoPedido = "";
-    if (ultimoPedido) {
-        const data = formatarDataBR(ultimoPedido.dia_pedido);
-        const diaSemana = NOMES_DIAS_CURTO[new Date(ultimoPedido.dia_pedido).getDay()] || "";
-        const { tipo, detalhe } = classificarMotivo(ultimoPedido.motivo);
-
-        let statusTexto = "";
-        if (tipo === "PEDIU_OK") statusTexto = "Pedido feito";
-        else if (tipo === "NAO_PEDIU") statusTexto = "Nao pedido";
-        else if (tipo === "ERRO_PEDIDO") statusTexto = "Erro no pedido";
-        else statusTexto = "Sem informacao";
-
-        // Adicionar nome do prato se disponivel no detalhe
-        const pratoInfo = detalhe ? ` (${formatarTitulo(detalhe)})` : "";
-        linhaUltimoPedido = `Ultimo pedido: ${diaSemana} ${data} - ${statusTexto}${pratoInfo}`;
-    }
-
-    // Prato do proximo dia util
+    // Prato do proximo dia util (esconde se for "nao cadastrado")
     let linhaPrato = "";
     if (pratoAtual?.prato_nome) {
-        const dataPrato = formatarDataBR(pratoAtual.dia_referente);
-        const diaPrato = NOMES_DIAS_CURTO[new Date(pratoAtual.dia_referente).getDay()] || "";
-        linhaPrato = `Cardapio ${diaPrato} ${dataPrato}: *${formatarTitulo(pratoAtual.prato_nome)}*`;
+        const pratoNorm = normalizar(pratoAtual.prato_nome);
+        const eValido = !pratoNorm.includes("nao cadastrado") && !pratoNorm.includes("nao identificado") && !pratoNorm.includes("erro");
+        if (eValido) {
+            const dataPrato = formatarDataBR(pratoAtual.dia_referente);
+            const diaPrato = NOMES_DIAS_CURTO[new Date(pratoAtual.dia_referente).getDay()] || "";
+            linhaPrato = `Cardapio ${diaPrato} ${dataPrato}: *${formatarTitulo(pratoAtual.prato_nome)}*`;
+        }
+    }
+
+    // Tabela visual da semana
+    let tabelaSemana = "";
+    if (dadosSemana) {
+        const agora = new Date();
+        const hojeIso = dataIsoUTC(agora);
+
+        // Indicadores de texto
+        const INDICADOR = {
+            PEDIDO: " OK ",
+            CANCELADO: " X  ",
+            ERRO: " !! ",
+            PENDENTE: " .. ",
+            NAO_VAI: " -- ",
+            HOJE: " HJ "
+        };
+
+        const segunda = obterSegundaDaSemana(agora);
+        const diasSemana = [1, 2, 3, 4, 5];
+        const nomeDias = ["Seg", "Ter", "Qua", "Qui", "Sex"];
+        const linhaIndicadores = [];
+
+        for (let i = 0; i < 5; i++) {
+            const diaNum = diasSemana[i];
+            const dataDodia = new Date(segunda);
+            dataDodia.setDate(segunda.getDate() + i);
+            const diaIso = dataIsoUTC(dataDodia);
+
+            const pedido = dadosSemana.pedidos.find(p => dataIsoUTC(p.dia_pedido) === diaIso);
+            const estaRegistrado = dadosSemana.diasPreferidos.includes(diaNum);
+
+            let indicador;
+            if (pedido) {
+                const { tipo } = classificarMotivo(pedido.motivo);
+                if (tipo === "PEDIU_OK") indicador = INDICADOR.PEDIDO;
+                else if (tipo === "NAO_PEDIU") indicador = INDICADOR.CANCELADO;
+                else if (tipo === "ERRO_PEDIDO") indicador = INDICADOR.ERRO;
+                else indicador = INDICADOR.CANCELADO;
+            } else if (diaIso < hojeIso) {
+                indicador = estaRegistrado ? INDICADOR.CANCELADO : INDICADOR.NAO_VAI;
+            } else if (diaIso === hojeIso) {
+                indicador = estaRegistrado ? INDICADOR.HOJE : INDICADOR.NAO_VAI;
+            } else {
+                indicador = estaRegistrado ? INDICADOR.PENDENTE : INDICADOR.NAO_VAI;
+            }
+            linhaIndicadores.push(indicador);
+        }
+
+        const linhaNomes = nomeDias.map(d => ` ${d} `).join("|");
+        const linhaStatus = linhaIndicadores.join("|");
+        const legenda = "_OK=Pedido  X=Cancelado  !!=Erro  ..=Pendente  --=Sem  HJ=Hoje_";
+        tabelaSemana = `\n${linhaNomes}\n${linhaStatus}\n${legenda}\n`;
     }
 
     return (
         `*IFSP Pirituba - Almoco*\n` +
-        `Ola, ${nome}!\n\n` +
+        `Ola, ${nome}!\n` +
         (linhaPrato ? `${linhaPrato}\n` : "") +
-        (linhaUltimoPedido ? `${linhaUltimoPedido}\n` : "") +
-        `───────────────\n`
+        tabelaSemana +
+        `\n───────────────\n`
     );
 }
 
@@ -597,6 +647,24 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         return rows;
     }
 
+    // Busca pedidos da semana atual (seg a sex) para a tabela visual
+    async function buscarPedidosSemanaAtual(c, alunoId) {
+        const segunda = obterSegundaDaSemana(new Date());
+        const sexta = new Date(segunda);
+        sexta.setDate(segunda.getDate() + 4);
+        const { rows } = await c.query(
+            `SELECT dia_pedido, motivo FROM pedido
+             WHERE aluno_id = $1
+               AND dia_pedido >= $2
+               AND dia_pedido <= $3
+               AND motivo NOT ILIKE '%anteriormente%'
+               AND motivo NOT LIKE '%Final%'
+             ORDER BY dia_pedido ASC, id DESC`,
+            [alunoId, dataIsoUTC(segunda), dataIsoUTC(sexta)]
+        );
+        return rows;
+    }
+
     async function obterPratoAtual(c) {
         const { rows } = await c.query(
             `SELECT dia_referente, prato_nome FROM proximo_prato ORDER BY updated_at DESC LIMIT 1`
@@ -605,17 +673,17 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
     }
 
     // --- Menu Principal ---
-    function menuPrincipalInterativo(aluno, ultimoPedido, pratoAtual) {
-        const cabecalho = gerarCabecalho(aluno, ultimoPedido, pratoAtual);
+    function menuPrincipalInterativo(aluno, pratoAtual, dadosSemana = null) {
+        const cabecalho = gerarCabecalho(aluno, pratoAtual, dadosSemana);
 
         const menu = cabecalho +
             "*Como posso ajudar?*\n" +
-            "Responda com o *numero* ou o *nome* do comando:\n\n" +
-            "*Acoes Rapidas*\n" +
+            "Responda com o *número* ou o *nome* do comando:\n\n" +
+            "*Ações Rápidas*\n" +
             "1. Cancelar Almoco\n" +
             "2. Meu Status\n" +
-            "3. Historico\n\n" +
-            "*Configuracoes*\n" +
+            "3. Histórico\n\n" +
+            "*Configurações*\n" +
             "4. Definir Dias\n" +
             "5. Bloquear Pratos\n" +
             "6. Desbloquear Pratos\n" +
@@ -662,11 +730,16 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         const telefone = chaveUsuario;
 
         // Busca dados no banco
-        const { aluno, ultimoPedido, pratoAtual } = await conectarBanco(async c => {
+        const { aluno, pratoAtual, dadosSemana } = await conectarBanco(async c => {
             const a = await buscarAlunoPorTelefone(c, telefone);
-            const up = a ? await buscarUltimoPedido(c, a.id) : null;
             const pa = await obterPratoAtual(c);
-            return { aluno: a, ultimoPedido: up, pratoAtual: pa };
+            let ds = null;
+            if (a) {
+                const pedidosSemana = await buscarPedidosSemanaAtual(c, a.id);
+                const diasPreferidos = await obterDiasPreferidos(c, a.id);
+                ds = { pedidos: pedidosSemana, diasPreferidos };
+            }
+            return { aluno: a, pratoAtual: pa, dadosSemana: ds };
         });
 
         // Se achou o aluno mas o estado local não tem ID, atualiza
@@ -679,7 +752,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         // -- Atalhos Globais --
         if (["ajuda", "menu", "help", "comandos", "oi", "ola", "bom dia", "boa tarde"].includes(textoNorm)) {
             atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
-            return menuPrincipalInterativo(aluno || null, ultimoPedido, pratoAtual);
+            return menuPrincipalInterativo(aluno || null, pratoAtual, dadosSemana);
         }
 
         // -- Atalhos Numéricos do Menu (1-6) --
@@ -701,7 +774,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             const diasTxt = info.dias.length ? formatarDiasHumanos(info.dias) : "nenhum";
             const bloqueiosTxt = info.bloqueios.length ? info.bloqueios.join(", ") : "nenhum";
 
-            const msg = gerarCabecalho(aluno, ultimoPedido, pratoAtual) +
+            const msg = gerarCabecalho(aluno, pratoAtual, dadosSemana) +
                 "*Status do seu cadastro*\n\n" +
                 `• Cadastro ativo: *${aluno.ativo ? "Sim" : "Não"}*\n` +
                 `• Dias cadastrados: *${diasTxt}*\n` +
@@ -724,7 +797,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             });
             corpo += linhas.join("\n");
 
-            return criarBotoes(gerarCabecalho(aluno, ultimoPedido, pratoAtual) + corpo, "Opções", [{ id: "menu", texto: "Voltar ao Menu" }]);
+            return criarBotoes(gerarCabecalho(aluno, pratoAtual, dadosSemana) + corpo, "Opções", [{ id: "menu", texto: "Voltar ao Menu" }]);
         }
 
         // ================= FLUXO DE CADASTRO =================
@@ -773,7 +846,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
                 }
 
                 atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {}, aluno_id: res.alunoId });
-                return menuPrincipalInterativo({ nome: res.aluno.nome }, null, pratoAtual);
+                return menuPrincipalInterativo({ nome: res.aluno.nome }, pratoAtual);
             }
             return MENSAGEM_BOAS_VINDAS;
         }
@@ -786,7 +859,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             if (!dias.length) return criarTexto("Selecione pelo menos um dia.");
             await conectarBanco(c => salvarPreferenciasDias(c, alunoAtual.id, dias));
             atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
-            return menuPrincipalInterativo(alunoAtual, ultimoPedido, pratoAtual);
+            return menuPrincipalInterativo(alunoAtual, pratoAtual, dadosSemana);
         }
 
         if (usuario.etapa === "DEFINIR_BLOQUEIOS") {
@@ -945,7 +1018,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
                 diasCadastrados,
                 bloqueios: bloqueiosUsuario,
                 ativo: alunoAtual.ativo,
-                ultimoPedido: ultimoPedido ? `${ultimoPedido.dia_pedido} - ${ultimoPedido.motivo}` : null
+                ultimoPedido: dadosSemana?.pedidos?.[0] ? `${dadosSemana.pedidos[0].dia_pedido} - ${dadosSemana.pedidos[0].motivo}` : null
             };
 
             const resultadoIA = await assistenteIA.classificarIntencao(texto, telefone, dadosParaIA);
@@ -960,7 +1033,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         }
 
         // Se a IA nao conseguiu ou retornou "ajuda", mostra o menu
-        return menuPrincipalInterativo(alunoAtual, ultimoPedido, pratoAtual);
+        return menuPrincipalInterativo(alunoAtual, pratoAtual, dadosSemana);
     }
 
     async function fecharBanco() {
