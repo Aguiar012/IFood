@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    restart: always # Tenta religar se cair
+    env_file:
+      - .env
+    volumes:
+      - ./dados_bot:/app/dados_bot # Persiste sessao do WhatsApp e autenticacao
+    environment:
+      - TZ=America/Sao_Paulo # Para logs ficarem no fuso certo

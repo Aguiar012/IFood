@@ -110,7 +110,7 @@ def buscar_cardapio_site(sessao):
     while data_alvo.isoweekday() in (6, 7):
         data_alvo += timedelta(days=1)
 
-    logging.info(f"Buscando cardapio no site para a data: {data_alvo}")
+    logging.info(f"Buscando cardápio no site para a data: {data_alvo}")
 
     meses = {
         'Janeiro': 1, 'Fevereiro': 2, 'Março': 3, 'Abril': 4, 'Maio': 5, 'Junho': 6,
@@ -129,7 +129,7 @@ def buscar_cardapio_site(sessao):
 
         if banner_alvo:
             prato_encontrado = _extrair_prato_do_banner(banner_alvo)
-            logging.info(f"Cardapio encontrado -> Dia: {data_alvo} | Prato: {prato_encontrado}")
+            logging.info(f"Cardápio encontrado -> Dia: {data_alvo} | Prato: {prato_encontrado}")
             atualizar_prato_dia(data_alvo, prato_encontrado)
         else:
             logging.warning(f"Data {data_alvo} nao encontrada no site.")
@@ -140,7 +140,7 @@ def buscar_cardapio_site(sessao):
             banner_hoje = _buscar_banner_por_data(todos_banners, hoje, meses)
             if banner_hoje:
                 prato_hoje = _extrair_prato_do_banner(banner_hoje)
-                logging.info(f"Cardapio de hoje tambem encontrado -> Dia: {hoje} | Prato: {prato_hoje}")
+                logging.info(f"Cardápio de hoje tambem encontrado -> Dia: {hoje} | Prato: {prato_hoje}")
                 atualizar_prato_dia(hoje, prato_hoje)
                 # Se o alvo principal nao foi encontrado, usa o de hoje como referencia
                 if not prato_encontrado or "não" in prato_encontrado.lower():
@@ -149,7 +149,7 @@ def buscar_cardapio_site(sessao):
         return prato_encontrado or "(cardápio não disponível)"
 
     except Exception as e:
-        logging.error(f"Erro ao ler cardapio do site: {e}")
+        logging.error(f"Erro ao ler cardápio do site: {e}")
         return "(erro na atualização)"
 
 def realizar_pedido(sessao, prontuario: str):

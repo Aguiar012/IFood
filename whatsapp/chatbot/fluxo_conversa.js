@@ -7,6 +7,13 @@ import { criarAssistenteIA } from "./assistente_ia.js";
 
 function apenasDigitos(s = "") { return (s || "").replace(/\D/g, ""); }
 
+// Verifica se um numero parece ser telefone real (BR: 12-13 digitos) e nao LID
+// Verifica se um numero parece ser telefone real (BR: 12-13 digitos) e nao LID (agora aceitamos LIDs tambem)
+function eTelefoneValido(tel = "") {
+    // Aceitamos qualquer ID com pelo menos 10 digitos (numeros ou LIDs)
+    return apenasDigitos(tel).length >= 10;
+}
+
 // Extrai apenas os números para usar como chave (ignora @s.whatsapp.net e :device_id)
 function jidParaTelefone(jid = "") {
     const idSemSufixo = String(jid).split("@")[0].split(":")[0];
@@ -190,12 +197,20 @@ function classificarMotivo(motivoBruto = "") {
     const tagNorm = normalizar(tag);
 
     let tipo = "OUTRO";
+    const motivoCompleto = normalizar(completo);
     if (tagNorm.startsWith("nao_pediu") || tagNorm.startsWith("nao pediu")) {
         tipo = "NAO_PEDIU";
     } else if (tagNorm.startsWith("pediu_ok")) {
         tipo = "PEDIU_OK";
     } else if (tagNorm.startsWith("erro_pedido")) {
-        tipo = "ERRO_PEDIDO";
+        // Se o erro diz "ticket gerado" ou "gerado anteriormente", na verdade o pedido ja foi feito
+        if (motivoCompleto.includes("ticket gerado") || motivoCompleto.includes("gerado anteriormente")) {
+            tipo = "PEDIU_OK";
+        } else {
+            tipo = "ERRO_PEDIDO";
+        }
+    } else if (motivoCompleto.includes("ticket gerado") || motivoCompleto.includes("gerado anteriormente")) {
+        tipo = "PEDIU_OK";
     }
 
     return { tipo, detalhe, bruto: completo };
@@ -215,7 +230,7 @@ function obterSegundaDaSemana(agora = new Date()) {
 
 function gerarCabecalho(aluno, pratoAtual, dadosSemana = null) {
     if (!aluno) {
-        return "*IFSP Pirituba - Almoco*\n\n";
+        return "*IFSP Pirituba - Almoço*\n\n";
     }
 
     const nome = aluno.nome?.split(" ")[0] || "Aluno";
@@ -228,7 +243,7 @@ function gerarCabecalho(aluno, pratoAtual, dadosSemana = null) {
         if (eValido) {
             const dataPrato = formatarDataBR(pratoAtual.dia_referente);
             const diaPrato = NOMES_DIAS_CURTO[new Date(pratoAtual.dia_referente).getDay()] || "";
-            linhaPrato = `Cardapio ${diaPrato} ${dataPrato}: *${formatarTitulo(pratoAtual.prato_nome)}*`;
+            linhaPrato = `Cardápio ${diaPrato} ${dataPrato}: *${formatarTitulo(pratoAtual.prato_nome)}*`;
         }
     }
 
@@ -237,21 +252,13 @@ function gerarCabecalho(aluno, pratoAtual, dadosSemana = null) {
     if (dadosSemana) {
         const agora = new Date();
         const hojeIso = dataIsoUTC(agora);
-
-        // Indicadores de texto
-        const INDICADOR = {
-            PEDIDO: " OK ",
-            CANCELADO: " X  ",
-            ERRO: " !! ",
-            PENDENTE: " .. ",
-            NAO_VAI: " -- ",
-            HOJE: " HJ "
-        };
+        const corte = obterHorarioCorte(agora);
+        const hojeJaPassou = agora >= corte; // Se passou do corte, hoje ja foi processado
 
         const segunda = obterSegundaDaSemana(agora);
         const diasSemana = [1, 2, 3, 4, 5];
         const nomeDias = ["Seg", "Ter", "Qua", "Qui", "Sex"];
-        const linhaIndicadores = [];
+        const partes = [];
 
         for (let i = 0; i < 5; i++) {
             const diaNum = diasSemana[i];
@@ -261,33 +268,27 @@ function gerarCabecalho(aluno, pratoAtual, dadosSemana = null) {
 
             const pedido = dadosSemana.pedidos.find(p => dataIsoUTC(p.dia_pedido) === diaIso);
             const estaRegistrado = dadosSemana.diasPreferidos.includes(diaNum);
+            // Dia ja passou se e antes de hoje, ou se e hoje e ja passou do corte
+            const diaJaPassou = (diaIso < hojeIso) || (diaIso === hojeIso && hojeJaPassou);
 
-            let indicador;
+            let emoji;
             if (pedido) {
                 const { tipo } = classificarMotivo(pedido.motivo);
-                if (tipo === "PEDIU_OK") indicador = INDICADOR.PEDIDO;
-                else if (tipo === "NAO_PEDIU") indicador = INDICADOR.CANCELADO;
-                else if (tipo === "ERRO_PEDIDO") indicador = INDICADOR.ERRO;
-                else indicador = INDICADOR.CANCELADO;
-            } else if (diaIso < hojeIso) {
-                indicador = estaRegistrado ? INDICADOR.CANCELADO : INDICADOR.NAO_VAI;
-            } else if (diaIso === hojeIso) {
-                indicador = estaRegistrado ? INDICADOR.HOJE : INDICADOR.NAO_VAI;
+                emoji = (tipo === "PEDIU_OK") ? "\u2705" : "\u274C";
+            } else if (diaJaPassou) {
+                emoji = "\u274C";
             } else {
-                indicador = estaRegistrado ? INDICADOR.PENDENTE : INDICADOR.NAO_VAI;
+                emoji = estaRegistrado ? "\u2611\uFE0F" : "\u274C";
             }
-            linhaIndicadores.push(indicador);
+            partes.push(`${nomeDias[i]}${emoji}`);
         }
 
-        const linhaNomes = nomeDias.map(d => ` ${d} `).join("|");
-        const linhaStatus = linhaIndicadores.join("|");
-        const legenda = "_OK=Pedido  X=Cancelado  !!=Erro  ..=Pendente  --=Sem  HJ=Hoje_";
-        tabelaSemana = `\n${linhaNomes}\n${linhaStatus}\n${legenda}\n`;
+        tabelaSemana = `\n${partes.join("  ")}\n`;
     }
 
     return (
-        `*IFSP Pirituba - Almoco*\n` +
-        `Ola, ${nome}!\n` +
+        `*IFSP Pirituba - Almoço*\n` +
+        `Oi ${nome}!\n` +
         (linhaPrato ? `${linhaPrato}\n` : "") +
         tabelaSemana +
         `\n───────────────\n`
@@ -552,22 +553,37 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         const aluno = await buscarAlunoPorProntuario(c, prontuario);
         if (!aluno) return { ok: false, motivo: "NAO_ENCONTRADO" };
 
+        // Protecao: nao salvar LIDs como telefone
+        if (!eTelefoneValido(telefone)) {
+            logger.warn(`[LID] Tentativa de vincular com LID em vez de telefone: ${telefone}`);
+            return { ok: false, motivo: "TELEFONE_INVALIDO" };
+        }
+
+        // Busca TODOS os contatos vinculados (sem LIMIT 1) para permitir múltiplos IDs (ex: LID e Número)
         const { rows } = await c.query(
-            `SELECT id, telefone FROM contato WHERE aluno_id = $1 LIMIT 1`, [aluno.id]
+            `SELECT id, telefone FROM contato WHERE aluno_id = $1`, [aluno.id]
         );
 
         if (rows.length) {
-            if (telefonesEquivalentes(rows[0].telefone, telefone)) {
-                // Mesmo telefone, atualiza para o formato do WhatsApp
+            // Verifica se este ID específico (telefone/LID) já está na lista
+            const jaVinculado = rows.some(r => telefonesEquivalentes(r.telefone, telefone));
+
+            if (!jaVinculado) {
+                // É um novo ID para o mesmo aluno (ex: mudou de Número para LID). 
+                // ADICIONAMOS em vez de substituir, para que ambos funcionem.
+                logger.info(`[MULTI-ID] Adicionando novo ID para aluno ${aluno.id}: ${telefone}`);
                 await c.query(
-                    `UPDATE contato SET telefone = $1 WHERE id = $2`,
-                    [telefone, rows[0].id]
+                    `INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`,
+                    [aluno.id, telefone]
                 );
-                return { ok: true, alunoId: aluno.id, aluno };
+                return { ok: true, alunoId: aluno.id, aluno, migrado: true };
             }
-            return { ok: false, motivo: "JA_VINCULADO", telefone: apenasDigitos(rows[0].telefone), aluno };
+
+            // Já existe esse ID. Tudo certo.
+            return { ok: true, alunoId: aluno.id, aluno, migrado: false };
         }
 
+        // Primeiro vínculo
         await c.query(
             `INSERT INTO contato (aluno_id, telefone) VALUES ($1,$2)`, [aluno.id, telefone]
         );
@@ -680,7 +696,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             "*Como posso ajudar?*\n" +
             "Responda com o *número* ou o *nome* do comando:\n\n" +
             "*Ações Rápidas*\n" +
-            "1. Cancelar Almoco\n" +
+            "1. Cancelar Almoço\n" +
             "2. Meu Status\n" +
             "3. Histórico\n\n" +
             "*Configurações*\n" +
@@ -693,24 +709,23 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
     }
 
     const MENSAGEM_BOAS_VINDAS = criarTexto(
-        "*IFSP Pirituba - Assistente de Almoco*\n\n" +
-        "Esse bot *pede seu almoco automaticamente* no site do SUAP todo dia de manha!\n\n" +
-        "Voce so precisa:\n" +
-        "1. Vincular seu prontuario IFSP\n" +
-        "2. Escolher quais dias da semana voce almoca\n\n" +
-        "Depois disso, o bot cuida do resto. Se nao quiser comer algum dia, e so cancelar pelo bot.\n\n" +
-        "Envie *continuar* para comecar o cadastro."
+        "*IFSP Pirituba - Assistente de Almoço*\n\n" +
+        "Esse bot *pede seu almoço automaticamente* no site do SUAP todo dia de manhã!\n\n" +
+        "Você só precisa:\n" +
+        "1. Vincular seu prontuário IFSP\n" +
+        "2. Escolher quais dias da semana você almoça\n\n" +
+        "Depois disso, o bot cuida do resto. Se não quiser comer algum dia, é só cancelar pelo bot.\n\n" +
+        "Envie *continuar* para começar o cadastro."
     );
 
     // --- Texto de Dias da Semana ---
     function menuDiasSemana(motivo) {
         return criarTexto(
             (motivo || "Escolha os dias da semana:") + "\n\n" +
-            "Em quais dias voce almoca no IFSP?\n" +
-            "O bot vai pedir seu almoco *automaticamente* nesses dias.\n\n" +
-            "Escreva os dias separados por virgula:\n" +
-            "Ex: *seg, ter, qua, qui, sex*\n\n" +
-            "Dias validos: seg, ter, qua, qui, sex"
+            "Em quais dias você almoça no IFSP?\n" +
+            "O bot vai pedir seu almoço *automaticamente* nesses dias.\n\n" +
+            "Escreva os dias separados por vírgula:\n\n" +
+            "Dias válidos: seg, ter, qua, qui, sex"
         );
     }
 
@@ -729,14 +744,20 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         const usuario = obterUsuario(chaveUsuario);
         const telefone = chaveUsuario;
 
-        // Busca dados no banco
+        // Busca dados no banco (queries em paralelo para velocidade)
         const { aluno, pratoAtual, dadosSemana } = await conectarBanco(async c => {
-            const a = await buscarAlunoPorTelefone(c, telefone);
-            const pa = await obterPratoAtual(c);
+            // Busca aluno e prato em paralelo (independentes entre si)
+            const [a, pa] = await Promise.all([
+                buscarAlunoPorTelefone(c, telefone),
+                obterPratoAtual(c)
+            ]);
             let ds = null;
             if (a) {
-                const pedidosSemana = await buscarPedidosSemanaAtual(c, a.id);
-                const diasPreferidos = await obterDiasPreferidos(c, a.id);
+                // Se achou aluno, busca pedidos e dias preferidos em paralelo
+                const [pedidosSemana, diasPreferidos] = await Promise.all([
+                    buscarPedidosSemanaAtual(c, a.id),
+                    obterDiasPreferidos(c, a.id)
+                ]);
                 ds = { pedidos: pedidosSemana, diasPreferidos };
             }
             return { aluno: a, pratoAtual: pa, dadosSemana: ds };
@@ -765,14 +786,10 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         if (textoNorm === "status" || textoNorm === "meu status" || textoNorm === "cadastro") {
             if (!aluno) return criarTexto(gerarCabecalho(null, null, pratoAtual) + "Seu número ainda *não está vinculado*. Envie: *CONTINUAR*.");
 
-            const info = await conectarBanco(async c => {
-                const dias = await obterDiasPreferidos(c, aluno.id);
-                const bloqueios = await obterBloqueios(c, aluno.id);
-                return { dias, bloqueios };
-            });
+            const bloqueiosUsuario = await conectarBanco(c => obterBloqueios(c, aluno.id));
 
-            const diasTxt = info.dias.length ? formatarDiasHumanos(info.dias) : "nenhum";
-            const bloqueiosTxt = info.bloqueios.length ? info.bloqueios.join(", ") : "nenhum";
+            const diasTxt = dadosSemana?.diasPreferidos?.length ? formatarDiasHumanos(dadosSemana.diasPreferidos) : "nenhum";
+            const bloqueiosTxt = bloqueiosUsuario.length ? bloqueiosUsuario.join(", ") : "nenhum";
 
             const msg = gerarCabecalho(aluno, pratoAtual, dadosSemana) +
                 "*Status do seu cadastro*\n\n" +
@@ -805,15 +822,15 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             if (usuario.etapa === "AGUARDANDO_PRONTUARIO") {
                 let pront = limparTexto(texto).replace(/\s+/g, "").toUpperCase().replace(/^PT/, "").replace(/\D/g, "");
                 if (!/^\d{5,12}$/.test(pront)) {
-                    return criarTexto("Formato invalido. Digite apenas numeros do prontuario (ex: 3029791).");
+                    return criarTexto("Formato invalido. Digite apenas números do prontuário (ex: 3029791).");
                 }
                 atualizarUsuario(chaveUsuario, { etapa: "AGUARDANDO_DIAS", dados_temporarios: { prontuario: pront } });
-                return menuDiasSemana("Prontuario recebido! Agora escolha os *dias da semana* que voce almoca:");
+                return menuDiasSemana("Prontuário recebido! Agora escolha os *dias da semana* que voce almoca:");
             }
 
             if (textoNorm.includes("continuar") || textoNorm === "continuar_cadastro") {
                 atualizarUsuario(chaveUsuario, { etapa: "AGUARDANDO_PRONTUARIO", dados_temporarios: {} });
-                return criarTexto("*Cadastro Inicial*\n\nPor favor, digite seu *prontuario IFSP* (apenas numeros).");
+                return criarTexto("*Cadastro Inicial*\n\nPor favor, digite seu *prontuario IFSP* (apenas números).");
             }
 
             if (usuario.etapa === "AGUARDANDO_CONSENTIMENTO") {
@@ -827,7 +844,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
 
             if (usuario.etapa === "AGUARDANDO_DIAS") {
                 const dias = interpretarListaDias(texto);
-                if (!dias.length) return criarTexto("Nao entendi. Digite os dias (ex: seg, ter).");
+                if (!dias.length) return criarTexto("Não entendi. Digite os dias (ex: seg, ter).");
 
                 const pront = usuario.dados_temporarios?.prontuario;
 
@@ -840,8 +857,8 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
                 });
 
                 if (!res.ok) {
-                    if (res.motivo === "NAO_ENCONTRADO") return criarBotoes("Prontuario nao encontrado na base.", "", [{ id: "continuar_cadastro", texto: "Tentar De Novo" }]);
-                    if (res.motivo === "JA_VINCULADO") return criarTexto("Prontuario ja vinculado a outro numero.");
+                    if (res.motivo === "NAO_ENCONTRADO") return criarBotoes("Prontuário não encontrado na base.", "", [{ id: "continuar_cadastro", texto: "Tentar De Novo" }]);
+                    if (res.motivo === "JA_VINCULADO") return criarTexto("Prontuário já vinculado a outro número.");
                     return criarTexto("Erro no sistema.");
                 }
 
@@ -985,13 +1002,13 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             const bloqueiosAtuais = await conectarBanco(c => obterBloqueios(c, alunoAtual.id));
             if (!bloqueiosAtuais.length) {
                 atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
-                return criarTexto("Voce nao tem pratos bloqueados.");
+                return criarTexto("Você não tem pratos bloqueados.");
             }
             atualizarUsuario(chaveUsuario, { etapa: "REMOVER_BLOQUEIOS", dados_temporarios: {} });
             return criarTexto(
                 "*Pratos bloqueados atualmente:*\n" +
                 bloqueiosAtuais.map(b => `- ${b}`).join("\n") +
-                "\n\nEnvie os nomes para desbloquear (separados por virgula)." +
+                "\n\nEnvie os nomes para desbloquear (separados por vírgula)." +
                 "\nOu envie *todos* para limpar tudo."
             );
         }
@@ -1000,12 +1017,12 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         if (textoNorm.includes("ativar")) {
             await conectarBanco(c => alterarStatusAtivo(c, alunoAtual.id, true));
             atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
-            return criarTexto("Robo ativado.");
+            return criarTexto("Robô ativado.");
         }
         if (textoNorm.includes("desativar")) {
             await conectarBanco(c => alterarStatusAtivo(c, alunoAtual.id, false));
             atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
-            return criarTexto("Robo pausado.");
+            return criarTexto("Robô pausado.");
         }
 
         // -- Fallback: tenta classificar com IA (so uma vez, evitar loop) --

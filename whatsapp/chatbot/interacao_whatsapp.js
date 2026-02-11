@@ -70,6 +70,8 @@ let whatsappPronto = false;
 globalThis.__ultimoQR = "";
 const mensagensProcessadas = new Set();
 
+
+
 // Limpa cache de mensagens processadas a cada 60 segundos
 setInterval(() => mensagensProcessadas.clear(), 60_000);
 
@@ -77,6 +79,7 @@ setInterval(() => mensagensProcessadas.clear(), 60_000);
 let tentativasReconexao = 0;
 const MAX_TENTATIVAS_RAPIDAS = 5;
 let ultimaConexaoBemSucedida = null;
+let intervaloHeartbeat = null;
 
 // === INICIAR WHATSAPP ===
 async function iniciarWhatsApp() {
@@ -84,6 +87,7 @@ async function iniciarWhatsApp() {
         // Limpeza de socket antigo para não vazar memória
         if (socket) {
             try {
+                if (intervaloHeartbeat) clearInterval(intervaloHeartbeat);
                 socket.ev.removeAllListeners();
                 socket.end(undefined); // NÃO usar logout() — ele apaga a sessão!
             } catch { }
@@ -162,6 +166,13 @@ async function iniciarWhatsApp() {
                 tentativasReconexao = 0; // Reseta contador
                 ultimaConexaoBemSucedida = new Date();
 
+                // Heartbeat: envia sinal de vida a cada 5 min para evitar erro 428 (Precondition Required)
+                intervaloHeartbeat = setInterval(() => {
+                    if (socket && whatsappPronto) {
+                        socket.sendPresenceUpdate('available').catch(() => { });
+                    }
+                }, 300_000);
+
                 // Verifica se a pasta auth tem arquivos
                 try {
                     const arquivos = fs.readdirSync(DIRETORIO_AUTH);
@@ -224,7 +235,19 @@ async function iniciarWhatsApp() {
                     return;
                 }
 
-                // 5. Outros erros: reconexão com backoff exponencial
+                // 5. Outros erros: reconexão
+                const statusCode = (lastDisconnect?.error)?.output?.statusCode;
+
+                // Tratamento especial para erros de instabilidade que exigem reconexão rápida
+                // 428: Precondition Required (geralmente conexão "fria")
+                // 515: Stream Error (falha de stream)
+                if (statusCode === 428 || statusCode === 515) {
+                    logger.warn(`[RECONNECT] Erro ${statusCode} detectado. Forcando reconexao imediata sem backoff...`);
+                    // Não incrementa tentativasReconexao para evitar espera longa
+                    setTimeout(iniciarWhatsApp, 1000);
+                    return;
+                }
+
                 tentativasReconexao++;
 
                 // Se muitas tentativas rápidas, espera mais tempo
@@ -255,10 +278,6 @@ async function iniciarWhatsApp() {
                     if (jid.endsWith("@g.us") || jid.endsWith("@newsletter")) continue;
 
                     // Normalização de JID
-                    if (jid.includes("@lid") && memoria_whatsapp) {
-                        const contato = memoria_whatsapp.contacts[jid];
-                        if (contato?.id && !contato.id.includes("@lid")) jid = contato.id;
-                    }
                     if (jidNormalizedUser) jid = jidNormalizedUser(jid);
 
                     // --- EXTRAÇÃO INTELIGENTE DE CONTEÚDO ---
