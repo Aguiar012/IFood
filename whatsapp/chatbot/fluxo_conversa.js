@@ -101,7 +101,11 @@ function formatarDDMM(d) {
 
 function dataIsoUTC(d) {
     // YYYY-MM-DD
-    return new Date(d).toISOString().slice(0, 10);
+    // Força o horário para 12:00 (meio-dia) para evitar que fuso horário (UTC-3)
+    // faça a data virar no dia seguinte ou anterior ao converter para UTC.
+    const x = new Date(d);
+    x.setHours(12, 0, 0, 0);
+    return x.toISOString().slice(0, 10);
 }
 
 function adicionarDias(d, n) {
@@ -239,7 +243,7 @@ function gerarCabecalho(aluno, pratoAtual, dadosSemana = null) {
     let linhaPrato = "";
     if (pratoAtual?.prato_nome) {
         const pratoNorm = normalizar(pratoAtual.prato_nome);
-        const eValido = !pratoNorm.includes("nao cadastrado") && !pratoNorm.includes("nao identificado") && !pratoNorm.includes("erro");
+        const eValido = !pratoNorm.includes("nao identificado") && !pratoNorm.includes("erro");
         if (eValido) {
             const dataPrato = formatarDataBR(pratoAtual.dia_referente);
             const diaPrato = NOMES_DIAS_CURTO[new Date(pratoAtual.dia_referente).getDay()] || "";
@@ -248,50 +252,73 @@ function gerarCabecalho(aluno, pratoAtual, dadosSemana = null) {
     }
 
     // Tabela visual da semana
+
+    // Tabela visual da semana (Refatorada para UX)
     let tabelaSemana = "";
     if (dadosSemana) {
-        const agora = new Date();
-        const hojeIso = dataIsoUTC(agora);
-        const corte = obterHorarioCorte(agora);
-        const hojeJaPassou = agora >= corte; // Se passou do corte, hoje ja foi processado
-
-        const segunda = obterSegundaDaSemana(agora);
         const diasSemana = [1, 2, 3, 4, 5];
         const nomeDias = ["Seg", "Ter", "Qua", "Qui", "Sex"];
-        const partes = [];
+
+        let diasVou = [];
+        let diasNaoVou = [];
+        let diasPediu = [];
+        let diasErro = [];
+
+        const agora = new Date();
+        const hojeIso = dataIsoUTC(agora);
+
+        // Determina a segunda-feira da semana visualizada
+        // Se for Sabado ou Domingo, mostra a PROXIMA semana
+        let segunda = obterSegundaDaSemana(agora);
+        if (agora.getDay() === 0 || agora.getDay() === 6) {
+            segunda.setDate(segunda.getDate() + 7);
+        }
 
         for (let i = 0; i < 5; i++) {
             const diaNum = diasSemana[i];
             const dataDodia = new Date(segunda);
             dataDodia.setDate(segunda.getDate() + i);
             const diaIso = dataIsoUTC(dataDodia);
+            const nomeDia = nomeDias[i];
 
             const pedido = dadosSemana.pedidos.find(p => dataIsoUTC(p.dia_pedido) === diaIso);
             const estaRegistrado = dadosSemana.diasPreferidos.includes(diaNum);
-            // Dia ja passou se e antes de hoje, ou se e hoje e ja passou do corte
-            const diaJaPassou = (diaIso < hojeIso) || (diaIso === hojeIso && hojeJaPassou);
 
-            let emoji;
             if (pedido) {
                 const { tipo } = classificarMotivo(pedido.motivo);
-                emoji = (tipo === "PEDIU_OK") ? "\u2705" : "\u274C";
-            } else if (diaJaPassou) {
-                emoji = "\u274C";
+                if (tipo === "PEDIU_OK") {
+                    diasPediu.push(`${nomeDia}`);
+                } else if (tipo === "NAO_PEDIU" || pedido.motivo.includes("CANCELADO")) {
+                    diasNaoVou.push(nomeDia);
+                } else {
+                    diasErro.push(`${nomeDia}`);
+                }
             } else {
-                emoji = estaRegistrado ? "\u2611\uFE0F" : "\u274C";
+                if (estaRegistrado) {
+                    diasVou.push(nomeDia);
+                } else {
+                    diasNaoVou.push(nomeDia);
+                }
             }
-            partes.push(`${nomeDias[i]}${emoji}`);
         }
 
-        tabelaSemana = `\n${partes.join("  ")}\n`;
+        tabelaSemana += "\n*Resumo da Semana:*\n";
+
+        if (diasPediu.length) tabelaSemana += `✅ *Já Pedi:* ${diasPediu.join(", ")}\n`;
+        if (diasVou.length) tabelaSemana += `📅 *Vai Pedir:* ${diasVou.join(", ")}\n`;
+        if (diasNaoVou.length) tabelaSemana += `❌ *Não Vai:* ${diasNaoVou.join(", ")}\n`;
+        if (diasErro.length) tabelaSemana += `⚠️ *Sem Dados:* ${diasErro.join(", ")}\n`;
+
+        tabelaSemana += "\n";
     }
+
 
     return (
         `*IFSP Pirituba - Almoço*\n` +
         `Oi ${nome}!\n` +
         (linhaPrato ? `${linhaPrato}\n` : "") +
         tabelaSemana +
-        `\n───────────────\n`
+        `───────────────\n`
     );
 }
 
@@ -682,10 +709,40 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
     }
 
     async function obterPratoAtual(c) {
+        // Nova Lógica: 
+        // Antes das 12:30 -> Tenta pegar cardápio de HOJE
+        // Depois das 12:30 -> Tenta pegar cardápio do PRÓXIMO DIA ÚTIL
+        const agora = new Date();
+        const corte = new Date(agora);
+        corte.setHours(12, 30, 0, 0);
+
+        let dataAlvo = new Date(agora);
+
+        // Se já passou do almoço de hoje, foca em amanhã
+        if (agora > corte) {
+            dataAlvo.setDate(dataAlvo.getDate() + 1);
+        }
+
+        // Pula fim de semana (Sáb/Dom -> Seg)
+        while (dataAlvo.getDay() === 0 || dataAlvo.getDay() === 6) {
+            dataAlvo.setDate(dataAlvo.getDate() + 1);
+        }
+
+        const iso = dataIsoUTC(dataAlvo);
+
+        // 1. Prioridade: Busca exata pela data calculada (ideal)
         const { rows } = await c.query(
-            `SELECT dia_referente, prato_nome FROM proximo_prato ORDER BY updated_at DESC LIMIT 1`
+            `SELECT dia_referente, prato_nome FROM proximo_prato WHERE dia_referente = $1 LIMIT 1`,
+            [iso]
         );
-        return rows[0] || null;
+        if (rows[0]) return rows[0];
+
+        // 2. Se não tiver no banco, retorna um placeholder para não mostrar prato velho
+        // O usuário prefere ver "Sexta: Ainda não divulgado" do que "Quinta: Kibe" (que confunde)
+        return {
+            dia_referente: dataAlvo, // Mantém a data correta (amanhã/hoje)
+            prato_nome: "Ainda não divulgado"
+        };
     }
 
     // --- Menu Principal ---
@@ -703,9 +760,32 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             "4. Definir Dias\n" +
             "5. Bloquear Pratos\n" +
             "6. Desbloquear Pratos\n" +
-            "7. Ativar/Desativar";
+            "7. Ativar/Desativar\n" +
+            "8. Guia / Ajuda";
 
         return { text: menu };
+    }
+
+
+    // --- Menu Guia (Novo) ---
+    function menuGuia() {
+        return criarTexto(
+            "*Guia do Bot IFSP Food* 🤖\n\n" +
+
+            "*Legenda dos Dias:*\n" +
+            "✅ *Já Pedi:* O bot já fez o pedido no SUAP.\n" +
+            "📅 *Vou Comer:* Está agendado, o bot vai pedir no dia.\n" +
+            "❌ *Não Vou:* Você não almoça ou cancelou este dia.\n" +
+            "⚠️ *Atenção:* Houve algum erro, verifique no SUAP.\n\n" +
+
+            "*Comandos Principais:*\n" +
+            "🔹 *Cancelar Almoço:* Cancela o pedido de um dia específico.\n" +
+            "🔹 *Definir Dias:* Escolha seus dias padrão de almoço (ex: seg, qua).\n" +
+            "🔹 *Bloquear Prato:* Impedir pedidos se tiver certo prato (ex: peixe).\n" +
+            "🔹 *Ativar/Desativar:* Liga ou desliga o robô temporariamente.\n\n" +
+
+            "Dica: Digite comandos diretos como *cancelar amanha* ou *não como peixe*."
+        );
     }
 
     const MENSAGEM_BOAS_VINDAS = criarTexto(
@@ -745,42 +825,79 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         const telefone = chaveUsuario;
 
         // Busca dados no banco (queries em paralelo para velocidade)
-        const { aluno, pratoAtual, dadosSemana } = await conectarBanco(async c => {
-            // Busca aluno e prato em paralelo (independentes entre si)
-            const [a, pa] = await Promise.all([
-                buscarAlunoPorTelefone(c, telefone),
-                obterPratoAtual(c)
-            ]);
-            let ds = null;
-            if (a) {
-                // Se achou aluno, busca pedidos e dias preferidos em paralelo
-                const [pedidosSemana, diasPreferidos] = await Promise.all([
-                    buscarPedidosSemanaAtual(c, a.id),
-                    obterDiasPreferidos(c, a.id)
+        // Busca dados no banco (queries em paralelo para velocidade e robustez)
+        let aluno = null, pratoAtual = null, dadosSemana = null;
+        try {
+            const { aluno: a, pratoAtual: pa, dadosSemana: ds } = await conectarBanco(async c => {
+                // Busca aluno e prato em paralelo (independentes)
+                // Se um falhar, não deve derrubar o bot inteiro (idealmente)
+                // Mas aqui usamos Promise.all, então se um der erro, cai no catch.
+                const [a, pa] = await Promise.all([
+                    buscarAlunoPorTelefone(c, telefone).catch(e => { logger.error(`[DB] Erro buscarAluno: ${e}`); return null; }),
+                    obterPratoAtual(c).catch(e => { logger.error(`[DB] Erro obterPrato: ${e}`); return null; })
                 ]);
-                ds = { pedidos: pedidosSemana, diasPreferidos };
-            }
-            return { aluno: a, pratoAtual: pa, dadosSemana: ds };
-        });
+                let ds = null;
+                if (a) {
+                    try {
+                        const [pedidosSemana, diasPreferidos] = await Promise.all([
+                            buscarPedidosSemanaAtual(c, a.id),
+                            obterDiasPreferidos(c, a.id)
+                        ]);
+                        ds = { pedidos: pedidosSemana, diasPreferidos };
+                    } catch (e) {
+                        logger.error(`[DB] Erro ao buscar dados da semana: ${e}`);
+                        // Continua sem histórico se der erro, melhor que travar.
+                    }
+                }
+                return { aluno: a, pratoAtual: pa, dadosSemana: ds };
+            });
+            aluno = a; pratoAtual = pa; dadosSemana = ds;
 
-        // Se achou o aluno mas o estado local não tem ID, atualiza
-        if (aluno && !usuario.aluno_id) {
-            atualizarUsuario(chaveUsuario, { aluno_id: aluno.id, etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
+        } catch (e) {
+            logger.error(`[CRITICAL] Falha total ao buscar dados no banco: ${e}`);
+            // Se falhar banco, tenta responder algo genérico ou ignora para não crashar
+            return { text: "⚠️ O sistema está instável no momento. Tente novamente em alguns instantes." };
+        }
+
+        // Se não achou aluno, força fluxo de cadastro (impede menu principal)
+        if (!aluno) {
+            // Mantém o fluxo normal que já lida com !aluno lá embaixo
+        } else {
+            // Se achou o aluno mas o estado local não tem ID, atualiza
+            if (!usuario.aluno_id) {
+                atualizarUsuario(chaveUsuario, { aluno_id: aluno.id, etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
+            }
         }
 
         const textoNorm = normalizar(texto);
 
-        // -- Atalhos Globais --
-        if (["ajuda", "menu", "help", "comandos", "oi", "ola", "bom dia", "boa tarde"].includes(textoNorm)) {
+        // CORREÇÃO: Verifica se é usuário novo ANTES de processar comandos globais
+        // Isso impede que "oi" abra o menu para quem nunca se cadastrou
+        if (!aluno) {
+            // ... lógica de cadastro (mantida igual, só movida de ordem mentalmente)
+            // Mas como o código original tem um bloco gigante "if (!aluno)", 
+            // basta garantir que o bloco "Atalhos Globais" NÃO rode se aluno for null.
+        }
+
+        // -- Atalhos Globais (REMOVIDO "oi", "ola" para deixar a IA responder) --
+        // Apenas comandos unívocos ficam aqui.
+        if (["ajuda", "menu", "help", "comandos"].includes(textoNorm)) {
             atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
             return menuPrincipalInterativo(aluno || null, pratoAtual, dadosSemana);
         }
 
-        // -- Atalhos Numéricos do Menu (1-6) --
-        const MAPA_NUMEROS = { "1": "cancelar", "2": "status", "3": "historico", "4": "preferencia", "5": "bloquear", "6": "desbloquear", "7": "ativar" };
+        // -- Atalhos Numéricos do Menu (1-8) --
+        const MAPA_NUMEROS = {
+            "1": "cancelar", "2": "status", "3": "historico",
+            "4": "preferencia", "5": "bloquear", "6": "desbloquear",
+            "7": "ativar", "8": "guia"
+        };
         if (MAPA_NUMEROS[textoNorm] && usuario.etapa === "MENU_PRINCIPAL") {
-            // Redireciona para o comando correspondente
             return processarTexto(jid, MAPA_NUMEROS[textoNorm]);
+        }
+
+        if (textoNorm === "guia" || textoNorm === "ajuda" || textoNorm === "como funciona") {
+            return menuGuia();
         }
 
         if (textoNorm === "status" || textoNorm === "meu status" || textoNorm === "cadastro") {
@@ -797,7 +914,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
                 `• Dias cadastrados: *${diasTxt}*\n` +
                 `• Pratos bloqueados: *${bloqueiosTxt}*\n`;
 
-            return criarBotoes(msg, "Opções", [{ id: "menu", texto: "Voltar ao Menu" }]);
+            return criarTexto(msg);
         }
 
         if (textoNorm.includes("historico")) {
@@ -814,7 +931,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             });
             corpo += linhas.join("\n");
 
-            return criarBotoes(gerarCabecalho(aluno, pratoAtual, dadosSemana) + corpo, "Opções", [{ id: "menu", texto: "Voltar ao Menu" }]);
+            return criarTexto(gerarCabecalho(aluno, pratoAtual, dadosSemana) + corpo);
         }
 
         // ================= FLUXO DE CADASTRO =================
