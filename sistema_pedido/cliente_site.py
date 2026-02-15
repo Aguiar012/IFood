@@ -14,7 +14,8 @@ PADROES_ERRO_IGNORAR = [
     r'Ticket Gerado', 
     r'PULOU_PREF', 
     r'Pulou por prefer.ncia', 
-    r'SKIP_DIA'
+    r'SKIP_DIA',
+    r'Final de Semana'   # Site retorna isso quando tenta pedir em fim de semana
 ]
 
 def validar_erro_relevante(mensagem: str) -> bool:
