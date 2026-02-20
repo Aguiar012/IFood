@@ -1,59 +1,142 @@
-# IF Food - Sistema de Automação e Bot
+# 🍽️ IF Food - Bot de Almoço do IFSP Pirituba
 
-Este projeto foi refatorado para ser mais fácil de entender e manter. O código foi modularizado e traduzido para português.
+Bot que **pede almoço automaticamente** no site do refeitório e permite o aluno **cancelar/gerenciar pelo WhatsApp**.
 
-## Estrutura do Projeto
+---
 
-### 1. Sistema Python (Pedidos Automáticos)
-A lógica de fazer os pedidos no site agora fica na pasta `sistema_pedido/`.
+## 📁 Como o projeto está organizado
 
-- **`sistema_pedido/iniciar_pedidos.py`**: O script principal. É esse que você deve rodar ou agendar.
-- **`sistema_pedido/configuracao.py`**: Onde ficam as variáveis (URL, tempos de espera).
-- **`sistema_pedido/cliente_site.py`**: Funções que acessam o site do refeitório.
-- **`sistema_pedido/banco_dados.py`**: Funções que mexem no banco de dados.
-- **`sistema_pedido/servicos/`**: Envio de E-mail e WhatsApp.
+### 📌 Arquivos que VOCÊS vão mexer:
 
-**Como rodar manualmente:**
+```
+IFood/
+│
+├── �️ INICIAR_BOT_AQUI.bat          ← Clique duas vezes pra ligar o bot no Windows
+├── 📄 .env                           ← Senhas e configurações secretas (criar manualmente)
+├── 📄 ferramenta_corrigir_banco.js   ← Script pra consertar o banco se der problema
+│
+├── 📂 whatsapp/                      ← � CÓDIGO DO BOT WHATSAPP (JavaScript)
+│   ├── 📂 bot/                          ← 🤖 O bot em si
+│   │   ├── 📄 servidor_bot.js              ← ⭐ PRINCIPAL: conecta no WhatsApp
+│   │   ├── 📄 logica_respostas.js          ← Decide o que responder pro aluno
+│   │   └── 📄 inteligencia_artificial.js   ← IA que entende mensagens diferentes
+│   └── 📄 configuracao_pastas.js        ← Define onde ficam os arquivos salvos
+│
+└── 📂 sistema_pedido/                ← 🍽️ CÓDIGO DOS PEDIDOS AUTOMÁTICOS (Python)
+    ├── 📄 iniciar_pedidos.py            ← ⭐ PRINCIPAL: faz os pedidos no site
+    ├── 📄 configuracao.py               ← URLs e tempos de espera
+    ├── 📄 cliente_site.py               ← Acessa o site do refeitório
+    ├── 📄 banco_dados.py                ← Lê e salva dados no banco
+    ├── 📄 utils.py                      ← Funções auxiliares
+    └── 📂 servicos/                     ← Avisos e notificações
+        ├── 📄 email.py                     ← Envia e-mail
+        └── 📄 whatsapp.py                  ← Avisa admins pelo WhatsApp
+```
+
+### 🚫 Arquivos que vocês NÃO precisam mexer:
+
+> Esses arquivos são de **configuração automática**. O sistema precisa deles, mas vocês podem ignorar.
+
+| Arquivo | Pra que serve (resumo) |
+|---------|----------------------|
+| `package.json` | Lista de bibliotecas do Node.js (tipo "lista de compras") |
+| `package-lock.json` | Trava as versões das bibliotecas (gerado automaticamente) |
+| `Dockerfile` | Receita pra rodar o projeto na nuvem com Docker |
+| `docker-compose.yml` | Configuração do Docker no computador local |
+| `fly.toml` | Configuração do servidor Fly.io (onde fica online) |
+| `pm2_config.cjs` | Configuração do PM2 (mantém o bot ligado no servidor) |
+| `.gitignore` | Diz pro Git quais arquivos NÃO subir pro GitHub |
+| `.gitattributes` | Configuração visual do GitHub |
+
+---
+
+## 🚀 Como rodar no seu computador (passo a passo)
+
+### Pré-requisitos
+1. Instale o [Node.js](https://nodejs.org/) (versão 18 ou mais recente)
+2. Tenha acesso ao banco de dados (peça a URL pro admin do projeto)
+
+### Rodando o Bot WhatsApp
+
+**Jeito fácil (Windows):**
+1. Crie um arquivo `.env` na raiz do projeto com as variáveis necessárias (veja abaixo)
+2. Clique duas vezes no arquivo `INICIAR_BOT_AQUI.bat` 🖱️
+3. Escaneie o QR Code que aparece no terminal com seu WhatsApp
+
+**Jeito pelo terminal:**
+```bash
+npm install
+npm start
+```
+
+**Ver o QR Code no navegador:** Acesse `http://localhost:3001/qr`
+
+### Rodando os pedidos automáticos (Python)
 ```bash
 python -m sistema_pedido.iniciar_pedidos
 ```
 
-### 2. Bot WhatsApp (Node.js)
-O código do bot muda para a pasta `whatsapp/chatbot` com novos nomes.
+---
 
-- **`chatbot/interacao_whatsapp.js`**: O servidor principal (antigo `conversa_zap.js`).
-- **`chatbot/fluxo_conversa.js`**: A lógica de inteligência (antigo `conversa_flow.js`).
-- **`caminhos.js`**: Configuração de pastas (antigo `paths.js`).
+## 🔑 Arquivo `.env` (variáveis secretas)
 
-**Como rodar o bot:**
-Use o PM2 com o arquivo atualizado:
-```bash
-pm2 start whatsapp/ecosystem.config.cjs
+Crie um arquivo chamado `.env` na raiz do projeto com este conteúdo:
+
+```env
+# Banco de dados (OBRIGATÓRIO)
+DATABASE_URL=postgres://usuario:senha@servidor:5432/nome_do_banco
+
+# IA do Gemini (opcional - pra respostas inteligentes)
+GEMINI_API_KEY=sua_chave_aqui
+
+# Email pra cancelamento (opcional)
+GMAIL_USER=seu_email@gmail.com
+GMAIL_APP_PASSWORD=sua_senha_de_app
+CAE_EMAIL=email_da_cae@ifsp.edu.br
+
+# Proxy (só se precisar)
+PROXY_URL=
 ```
 
-### 3. Rodando o Bot Localmente (Windows)
+> ⚠️ **NUNCA** suba o `.env` pro GitHub! Ele já está no `.gitignore`.
 
-Se você quiser rodar o bot no seu próprio computador para testes:
+---
 
-1.  Instale o [Node.js](https://nodejs.org/).
-2.  Crie um arquivo `.env` na raiz do projeto (use o `.env.example` como base).
-3.  Preencha as variáveis no `.env` (ex: `DATABASE_URL`).
-4.  Execute o arquivo:
-    ```bash
-    .\iniciar_bot_local.bat
-    ```
-    Ou via terminal:
-    ```bash
-    npm install
-    npm start
-    ```
-5.  Escaneie o QR Code que aparecerá no terminal (ou acesse `http://localhost:3001/qr`).
+## 🛠️ Como funciona por dentro
 
-## Arquivos Antigos
-Os arquivos originais foram renomeados/mantidos como backup:
-- `auto_pedido_ANTIGO.py` (era `auto_pedido.py`).
+### Bot WhatsApp (Node.js)
+1. `servidor_bot.js` conecta no WhatsApp usando a biblioteca Baileys
+2. Quando alguém manda mensagem, passa pro `logica_respostas.js`
+3. Se a mensagem não bate com nenhum comando, vai pro `inteligencia_artificial.js` (IA do Gemini)
 
-## Solução de Problemas
+### Pedidos Automáticos (Python)
+1. `iniciar_pedidos.py` roda todo dia de manhã (agendado)
+2. Busca no banco quem quer almoçar naquele dia
+3. Acessa o site do refeitório e faz o pedido pra cada aluno
+4. Avisa os admins se der algum erro
 
-- **Erro de Banco**: Confirme se `DATABASE_URL` está definido.
-- **Bot Travado**: Apague `whatsapp/data/wa_auth_zapbot` para reiniciar a sessão.
+---
+
+## 🐛 Problemas comuns
+
+| Problema | Solução |
+|----------|---------|
+| Bot não conecta | Apague a pasta `dados_bot/auth` e escaneie o QR de novo |
+| Erro de banco de dados | Verifique se `DATABASE_URL` está no `.env` |
+| QR Code não aparece | Acesse `http://localhost:3001/qr` no navegador |
+| Bot parou do nada | Rode `npm start` de novo ou use o `.bat` |
+
+---
+
+## 📦 Deploy (subir pra nuvem)
+
+O projeto usa [Fly.io](https://fly.io). Para fazer deploy:
+
+```bash
+fly deploy
+```
+
+Para rodar com PM2 em servidor próprio:
+```bash
+pm2 start whatsapp/pm2_config.cjs
+```

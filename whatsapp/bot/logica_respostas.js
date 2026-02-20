@@ -3,7 +3,7 @@ import path from "path";
 import pkg from "pg";
 const { Pool } = pkg;
 import nodemailer from "nodemailer";
-import { criarAssistenteIA } from "./assistente_ia.js";
+import { criarAssistenteIA } from "./inteligencia_artificial.js";
 
 function apenasDigitos(s = "") { return (s || "").replace(/\D/g, ""); }
 

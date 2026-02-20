@@ -31,6 +31,6 @@ echo (Para parar, pressione Ctrl + C)
 echo.
 
 :: Roda o node com suporte a .env
-node -r dotenv/config whatsapp/chatbot/interacao_whatsapp.js
+node -r dotenv/config whatsapp/bot/servidor_bot.js
 
 pause

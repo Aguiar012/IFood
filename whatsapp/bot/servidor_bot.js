@@ -10,8 +10,8 @@ import path from "path";
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
-import caminhos from "../caminhos.js";
-import { criarFluxoConversa } from "./fluxo_conversa.js";
+import caminhos from "../configuracao_pastas.js";
+import { criarFluxoConversa } from "./logica_respostas.js";
 
 // --- CONFIGURAÇÃO ---
 const PORTA = Number(process.env.PORT) || 3001;

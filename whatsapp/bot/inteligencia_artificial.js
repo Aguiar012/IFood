@@ -16,12 +16,12 @@ const COMANDOS_VALIDOS = [
     "ativar", "desativar", "ajuda"
 ];
 
-const PROMPT_SISTEMA = `Voce e o assistente do bot de almoço do IFSP.
+const PROMPT_SISTEMA = `Você é o assistente do bot de almoço do IFSP.
 
 COMO O SISTEMA FUNCIONA:
-- O bot pede almoço AUTOMATICAMENTE de manha nos dias que o aluno escolheu
-- Se o aluno NAO quer comer, precisa CANCELAR antes
-- Pratos bloqueados sao pulados automaticamente
+- O bot pede almoço AUTOMATICAMENTE de manhã nos dias que o aluno escolheu
+- Se o aluno NÃO quer comer, precisa CANCELAR antes
+- Pratos bloqueados são pulados automaticamente
 - O aluno pode configurar dias, bloquear pratos, ver status e historico
 
 FORMATO DA SUA RESPOSTA:

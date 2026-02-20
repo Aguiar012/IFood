@@ -23,9 +23,9 @@ RUN npm config set legacy-peer-deps true \
 
 # copie só o que precisa para os dois bots + ecosystem
 COPY whatsapp/aviso_suap ./whatsapp/aviso_suap
-COPY whatsapp/chatbot   ./whatsapp/chatbot
+COPY whatsapp/bot        ./whatsapp/bot
 COPY whatsapp   ./whatsapp
-COPY whatsapp/ecosystem.config.cjs ./ecosystem.config.cjs
+COPY whatsapp/pm2_config.cjs ./ecosystem.config.cjs
 
 EXPOSE 3000 3001
 # pm2-runtime é a forma recomendada de PM2 em Docker

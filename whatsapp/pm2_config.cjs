@@ -20,7 +20,7 @@ module.exports = {
       name: "conversazap",
       cwd: '/app',
       // Atualizado para o novo arquivo traduzido
-      script: "whatsapp/chatbot/interacao_whatsapp.js",
+      script: "whatsapp/bot/servidor_bot.js",
       autorestart: true,
       // Configurações importantes para estabilidade:
       max_memory_restart: '400M', // Reinicia se vazar memória
