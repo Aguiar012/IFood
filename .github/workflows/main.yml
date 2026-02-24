@@ -3,7 +3,7 @@ name: AlmoPT
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 9 * * 1-5'
+    - cron: '0 16 * * 1-5'
     - cron: '0 17 * * 1-5'
 
 jobs:
