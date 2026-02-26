@@ -86,6 +86,7 @@ let intervaloHeartbeat = null;
 let intervaloWatchdog = null;
 let ultimaAtividade = Date.now(); // Rastreia última atividade real (msg enviada/recebida)
 let jaTeveConexao = false; // Indica se já conectou pelo menos 1 vez nesta sessão
+const inicioProcesso = Date.now(); // Para grace period do health check
 
 // Atualiza timestamp de atividade
 function registrarAtividade() { ultimaAtividade = Date.now(); }
@@ -433,13 +434,19 @@ app.post("/send-message", async (req, res) => {
 app.get("/", (req, res) => res.send("Servidor Bot Online"));
 app.get("/status", (req, res) => {
     const tempoInativo = Date.now() - ultimaAtividade;
+    const tempoDesdeInicio = Date.now() - inicioProcesso;
     const status = {
         online: whatsappPronto,
         tentativasReconexao,
         ultimaConexao: ultimaConexaoBemSucedida,
-        inativoHa: Math.round(tempoInativo / 1000) + "s"
+        inativoHa: Math.round(tempoInativo / 1000) + "s",
+        uptimeSegundos: Math.round(tempoDesdeInicio / 1000)
     };
-    // Retorna 503 se offline OU se inativo por mais de 10 min
+    // Grace period de 3 min após iniciar — retorna 200 enquanto conecta pela primeira vez
+    if (tempoDesdeInicio < 180_000) {
+        return res.json(status);
+    }
+    // Após grace period: retorna 503 se offline OU inativo por mais de 10 min
     // Isso faz o health check do Fly.io falhar e reiniciar a máquina
     if (!whatsappPronto || tempoInativo > 600_000) {
         return res.status(503).json(status);
