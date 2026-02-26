@@ -43,7 +43,6 @@ const criarSocketWhatsApp = baileys.default || baileys.makeWASocket || baileys;
 const {
     useMultiFileAuthState,
     fetchLatestBaileysVersion,
-    makeInMemoryStore,
     DisconnectReason,
     isJidBroadcast,
     isJidNewsletter,
@@ -53,10 +52,9 @@ const {
 } = baileys;
 
 // --- MEMÓRIA (STORE) ---
-let memoria_whatsapp;
-try {
-    memoria_whatsapp = makeInMemoryStore({ logger });
-} catch (e) { }
+// NOTA: makeInMemoryStore desabilitado — ele acumula RAM sem limite e causa OOM em containers.
+// Dados importantes (alunos, pedidos, bloqueios) ficam no Postgres, não são afetados.
+let memoria_whatsapp = null;
 
 const fluxo = criarFluxoConversa({
     diretorioDados: DIRETORIO_DADOS,
@@ -72,26 +70,44 @@ const mensagensProcessadas = new Set();
 
 
 
-// Limpa cache de mensagens processadas a cada 60 segundos
-setInterval(() => mensagensProcessadas.clear(), 60_000);
+// Limpa cache de mensagens processadas a cada 60 segundos (com limite de segurança)
+setInterval(() => {
+    if (mensagensProcessadas.size > 0) {
+        logger.info(`[CACHE] Limpando ${mensagensProcessadas.size} IDs de mensagens do cache`);
+        mensagensProcessadas.clear();
+    }
+}, 60_000);
 
 // --- CONTADORES DE ESTABILIDADE ---
 let tentativasReconexao = 0;
 const MAX_TENTATIVAS_RAPIDAS = 5;
 let ultimaConexaoBemSucedida = null;
 let intervaloHeartbeat = null;
+let intervaloWatchdog = null;
+let ultimaAtividade = Date.now(); // Rastreia última atividade real (msg enviada/recebida)
+let jaTeveConexao = false; // Indica se já conectou pelo menos 1 vez nesta sessão
+
+// Atualiza timestamp de atividade
+function registrarAtividade() { ultimaAtividade = Date.now(); }
 
 // === INICIAR WHATSAPP ===
 async function iniciarWhatsApp() {
     try {
         // Limpeza de socket antigo para não vazar memória
+        if (intervaloHeartbeat) {
+            clearInterval(intervaloHeartbeat);
+            intervaloHeartbeat = null;
+        }
+        if (intervaloWatchdog) {
+            clearInterval(intervaloWatchdog);
+            intervaloWatchdog = null;
+        }
         if (socket) {
-            try {
-                if (intervaloHeartbeat) clearInterval(intervaloHeartbeat);
-                socket.ev.removeAllListeners();
-                socket.end(undefined); // NÃO usar logout() — ele apaga a sessão!
-            } catch { }
+            const socketAntigo = socket;
             socket = null;
+            whatsappPronto = false;
+            try { socketAntigo.ev.removeAllListeners(); } catch (e) { logger.warn(`[CLEANUP] Erro ao remover listeners: ${e}`); }
+            try { socketAntigo.end(undefined); } catch (e) { logger.warn(`[CLEANUP] Erro ao fechar socket: ${e}`); }
         }
 
         logger.info(`[AUTH] Salvando credenciais em: ${DIRETORIO_AUTH}`);
@@ -154,6 +170,18 @@ async function iniciarWhatsApp() {
 
             if (qr) {
                 globalThis.__ultimoQR = qr;
+
+                // Se já teve conexão antes, QR inesperado = credenciais corrompidas
+                if (jaTeveConexao) {
+                    logger.error("[QR] QR CODE INESPERADO! Sessao anterior perdida. Limpando auth e reconectando...");
+                    try { fs.rmSync(DIRETORIO_AUTH, { recursive: true, force: true }); } catch { }
+                    try { fs.mkdirSync(DIRETORIO_AUTH, { recursive: true }); } catch { }
+                    jaTeveConexao = false; // Permite o próximo QR ser exibido normalmente
+                    tentativasReconexao = 0;
+                    setTimeout(iniciarWhatsApp, 2000);
+                    return;
+                }
+
                 logger.info("[QR] ESCANEIE O QR CODE LOGO ABAIXO:");
                 // Exibe QR Code pequeno no terminal
                 qrcodeTerminal.generate(qr, { small: true });
@@ -165,13 +193,52 @@ async function iniciarWhatsApp() {
                 globalThis.__ultimoQR = "";
                 tentativasReconexao = 0; // Reseta contador
                 ultimaConexaoBemSucedida = new Date();
+                jaTeveConexao = true;
+                registrarAtividade();
 
                 // Heartbeat: envia sinal de vida a cada 5 min para evitar erro 428 (Precondition Required)
+                // Limpa heartbeat anterior para evitar múltiplos intervalos acumulados
+                if (intervaloHeartbeat) {
+                    clearInterval(intervaloHeartbeat);
+                    intervaloHeartbeat = null;
+                }
                 intervaloHeartbeat = setInterval(() => {
                     if (socket && whatsappPronto) {
-                        socket.sendPresenceUpdate('available').catch(() => { });
+                        socket.sendPresenceUpdate('available').catch((e) => {
+                            logger.warn(`[HEARTBEAT] Falha ao enviar presença: ${e.message || e}`);
+                        });
+                        registrarAtividade(); // Heartbeat bem-sucedido conta como atividade
                     }
                 }, 300_000);
+
+                // --- WATCHDOG: Detecta conexões zumbi ---
+                // A cada 3 minutos, verifica se o socket ainda responde de verdade
+                if (intervaloWatchdog) {
+                    clearInterval(intervaloWatchdog);
+                    intervaloWatchdog = null;
+                }
+                intervaloWatchdog = setInterval(async () => {
+                    if (!socket || !whatsappPronto) return;
+
+                    const tempoInativo = Date.now() - ultimaAtividade;
+                    // Se passou mais de 10 minutos sem NENHUMA atividade (nem heartbeat), conexão morreu
+                    if (tempoInativo > 600_000) {
+                        logger.error(`[WATCHDOG] Conexao inativa ha ${Math.round(tempoInativo / 60000)} min! Forcando reconexao...`);
+                        whatsappPronto = false;
+                        setTimeout(iniciarWhatsApp, 1000);
+                        return;
+                    }
+
+                    // Teste ativo: tenta enviar presença e vê se funciona
+                    try {
+                        await socket.sendPresenceUpdate('available');
+                    } catch (e) {
+                        logger.warn(`[WATCHDOG] Socket nao respondeu ao teste de presenca: ${e.message || e}`);
+                        logger.warn(`[WATCHDOG] Forcando reconexao...`);
+                        whatsappPronto = false;
+                        setTimeout(iniciarWhatsApp, 2000);
+                    }
+                }, 180_000); // A cada 3 minutos
 
                 // Verifica se a pasta auth tem arquivos
                 try {
@@ -239,9 +306,10 @@ async function iniciarWhatsApp() {
                 const statusCode = (lastDisconnect?.error)?.output?.statusCode;
 
                 // Tratamento especial para erros de instabilidade que exigem reconexão rápida
+                // 408: Timeout (conexão expirou após inatividade)
                 // 428: Precondition Required (geralmente conexão "fria")
                 // 515: Stream Error (falha de stream)
-                if (statusCode === 428 || statusCode === 515) {
+                if (statusCode === 408 || statusCode === 428 || statusCode === 515) {
                     logger.warn(`[RECONNECT] Erro ${statusCode} detectado. Forcando reconexao imediata sem backoff...`);
                     // Não incrementa tentativasReconexao para evitar espera longa
                     setTimeout(iniciarWhatsApp, 1000);
@@ -315,6 +383,7 @@ async function iniciarWhatsApp() {
                     if (!texto) continue;
 
                     logger.info(`[MSG] Mensagem de ${jid} [${tipoMsg}]: "${texto.substring(0, 50)}..."`);
+                    registrarAtividade(); // Mensagem recebida = bot está vivo
 
                     // Feedback visual de "digitando..."
                     await socket.sendPresenceUpdate('composing', jid);
@@ -323,9 +392,13 @@ async function iniciarWhatsApp() {
                     const resposta = await fluxo.processarTexto(jid, texto, isButton);
 
                     if (resposta) {
-                        const payload = typeof resposta === "string" ? { text: resposta } : resposta;
-                        await socket.sendMessage(jid, payload);
-                        logger.info(`[SENT] Resposta enviada para ${jid}`);
+                        // Suporta múltiplas mensagens (ex: imagem + botões)
+                        const mensagens = Array.isArray(resposta) ? resposta : [resposta];
+                        for (const msg of mensagens) {
+                            const payload = typeof msg === "string" ? { text: msg } : msg;
+                            await socket.sendMessage(jid, payload);
+                        }
+                        logger.info(`[SENT] ${mensagens.length} msg(s) enviada(s) para ${jid}`);
                     }
                 } catch (erro) {
                     logger.error(`[ERROR] Erro ao processar mensagem: ${erro}`);
@@ -358,11 +431,21 @@ app.post("/send-message", async (req, res) => {
 });
 
 app.get("/", (req, res) => res.send("Servidor Bot Online"));
-app.get("/status", (req, res) => res.json({
-    online: whatsappPronto,
-    tentativasReconexao,
-    ultimaConexao: ultimaConexaoBemSucedida
-}));
+app.get("/status", (req, res) => {
+    const tempoInativo = Date.now() - ultimaAtividade;
+    const status = {
+        online: whatsappPronto,
+        tentativasReconexao,
+        ultimaConexao: ultimaConexaoBemSucedida,
+        inativoHa: Math.round(tempoInativo / 1000) + "s"
+    };
+    // Retorna 503 se offline OU se inativo por mais de 10 min
+    // Isso faz o health check do Fly.io falhar e reiniciar a máquina
+    if (!whatsappPronto || tempoInativo > 600_000) {
+        return res.status(503).json(status);
+    }
+    res.json(status);
+});
 app.get("/qr", (req, res) => {
     if (!globalThis.__ultimoQR) return res.send("<h3>Conectado ou Aguardando QR Code...</h3>");
     res.send(`<div id="qrcode"></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><script>new QRCode(document.getElementById('qrcode'), { text: "${globalThis.__ultimoQR}", width: 300, height: 300 });</script>`);
@@ -386,12 +469,27 @@ process.on("unhandledRejection", e => {
 
 // --- SINAL DE DESLIGAMENTO GRACIOSO ---
 let desligandoGraciosamente = false;
-process.on("SIGINT", async () => {
-    logger.info("[STOP] Desligando bot...");
+
+async function desligarGraciosamente(sinal) {
+    if (desligandoGraciosamente) return; // Evita executar duas vezes
+    logger.info(`[STOP] Recebido ${sinal}. Desligando bot...`);
     desligandoGraciosamente = true;
+    if (intervaloHeartbeat) {
+        clearInterval(intervaloHeartbeat);
+        intervaloHeartbeat = null;
+    }
+    if (intervaloWatchdog) {
+        clearInterval(intervaloWatchdog);
+        intervaloWatchdog = null;
+    }
     if (socket) {
+        try { socket.ev.removeAllListeners(); } catch { }
         try { socket.end(undefined); } catch { }
     }
+    try { await fluxo.fechar(); } catch { }
     // Aguarda evento connection.close processar sem deletar auth
-    setTimeout(() => process.exit(0), 1500);
-});
+    setTimeout(() => process.exit(0), 2000);
+}
+
+process.on("SIGINT", () => desligarGraciosamente("SIGINT"));
+process.on("SIGTERM", () => desligarGraciosamente("SIGTERM")); // Fly.io envia SIGTERM
