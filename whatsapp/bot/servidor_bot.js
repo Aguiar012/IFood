@@ -446,9 +446,11 @@ app.get("/status", (req, res) => {
     if (tempoDesdeInicio < 180_000) {
         return res.json(status);
     }
-    // Após grace period: retorna 503 se offline OU inativo por mais de 10 min
-    // Isso faz o health check do Fly.io falhar e reiniciar a máquina
-    if (!whatsappPronto || tempoInativo > 600_000) {
+    // Só retorna 503 se AMBAS as condições forem verdadeiras:
+    // 1. Bot está offline (whatsappPronto = false)
+    // 2. Última atividade foi há mais de 5 minutos (não é uma reconexão rápida)
+    // Isso evita que o Fly.io mate o processo durante reconexões normais (que duram segundos)
+    if (!whatsappPronto && tempoInativo > 300_000) {
         return res.status(503).json(status);
     }
     res.json(status);
