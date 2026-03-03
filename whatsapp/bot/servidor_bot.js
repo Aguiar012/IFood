@@ -87,6 +87,8 @@ let intervaloWatchdog = null;
 let ultimaAtividade = Date.now(); // Rastreia última atividade real (msg enviada/recebida)
 let jaTeveConexao = false; // Indica se já conectou pelo menos 1 vez nesta sessão
 const inicioProcesso = Date.now(); // Para grace period do health check
+let tentativasQR = 0; // Conta quantas vezes QR foi mostrado sem sucesso
+let aguardandoQR = false; // Indica se está esperando scan de QR
 
 // Atualiza timestamp de atividade
 function registrarAtividade() { ultimaAtividade = Date.now(); }
@@ -171,20 +173,16 @@ async function iniciarWhatsApp() {
 
             if (qr) {
                 globalThis.__ultimoQR = qr;
+                aguardandoQR = true;
+                tentativasQR++;
 
-                // Se já teve conexão antes, QR inesperado = credenciais corrompidas
                 if (jaTeveConexao) {
-                    logger.error("[QR] QR CODE INESPERADO! Sessao anterior perdida. Limpando auth e reconectando...");
-                    try { fs.rmSync(DIRETORIO_AUTH, { recursive: true, force: true }); } catch { }
-                    try { fs.mkdirSync(DIRETORIO_AUTH, { recursive: true }); } catch { }
-                    jaTeveConexao = false; // Permite o próximo QR ser exibido normalmente
-                    tentativasReconexao = 0;
-                    setTimeout(iniciarWhatsApp, 2000);
-                    return;
+                    // QR inesperado — sessão expirou, mas NÃO deleta auth (pode ser glitch)
+                    logger.error(`[QR] QR INESPERADO! Sessao anterior pode ter expirado. Tentativa QR #${tentativasQR}`);
+                } else {
+                    logger.info(`[QR] ESCANEIE O QR CODE (tentativa #${tentativasQR}):`);
                 }
 
-                logger.info("[QR] ESCANEIE O QR CODE LOGO ABAIXO:");
-                // Exibe QR Code pequeno no terminal
                 qrcodeTerminal.generate(qr, { small: true });
             }
 
@@ -192,7 +190,9 @@ async function iniciarWhatsApp() {
                 logger.info("[OK] CONECTADO AO WHATSAPP!");
                 whatsappPronto = true;
                 globalThis.__ultimoQR = "";
-                tentativasReconexao = 0; // Reseta contador
+                tentativasReconexao = 0;
+                tentativasQR = 0;
+                aguardandoQR = false;
                 ultimaConexaoBemSucedida = new Date();
                 jaTeveConexao = true;
                 registrarAtividade();
@@ -264,6 +264,16 @@ async function iniciarWhatsApp() {
 
                 logger.warn(`[WARN] Conexao fechada. Motivo: ${motivo} (code: ${status})`);
 
+                // Se estava esperando QR (ninguém escaneou), não ficar em loop
+                if (aguardandoQR) {
+                    aguardandoQR = false;
+                    // Backoff progressivo: 30s, 60s, 120s, 300s (max 5 min)
+                    const tempoEsperaQR = Math.min(30000 * Math.pow(2, tentativasQR - 1), 300000);
+                    logger.info(`[QR-WAIT] QR nao escaneado. Proxima tentativa em ${tempoEsperaQR / 1000}s (tentativa #${tentativasQR})`);
+                    setTimeout(iniciarWhatsApp, tempoEsperaQR);
+                    return;
+                }
+
                 // Se estamos desligando graciosamente (Ctrl+C), NAO apagar sessao
                 if (desligandoGraciosamente) {
                     logger.info("[STOP] Desligamento gracioso, mantendo sessao.");
@@ -294,25 +304,24 @@ async function iniciarWhatsApp() {
                     return;
                 }
 
-                // 4. Credenciais inválidas
+                // 4. Credenciais inválidas — tenta reconectar SEM apagar auth
+                // (Apagar auth destrói a sessão permanentemente e exige novo QR)
                 if (status === DisconnectReason.badSession) {
-                    logger.error("[BAD_SESSION] SESSAO CORROMPIDA! Limpando e pedindo novo QR...");
-                    try { fs.rmSync(DIRETORIO_AUTH, { recursive: true, force: true }); } catch { }
-                    tentativasReconexao = 0;
-                    setTimeout(iniciarWhatsApp, 2000);
+                    logger.error("[BAD_SESSION] SESSAO COM PROBLEMA! Tentando reconectar sem apagar credenciais...");
+                    tentativasReconexao++;
+                    const tempoEspera = Math.min(5000 * tentativasReconexao, 30000);
+                    setTimeout(iniciarWhatsApp, tempoEspera);
                     return;
                 }
 
                 // 5. Outros erros: reconexão
                 const statusCode = (lastDisconnect?.error)?.output?.statusCode;
 
-                // Tratamento especial para erros de instabilidade que exigem reconexão rápida
-                // 408: Timeout (conexão expirou após inatividade)
-                // 428: Precondition Required (geralmente conexão "fria")
-                // 515: Stream Error (falha de stream)
-                if (statusCode === 408 || statusCode === 428 || statusCode === 515) {
-                    logger.warn(`[RECONNECT] Erro ${statusCode} detectado. Forcando reconexao imediata sem backoff...`);
-                    // Não incrementa tentativasReconexao para evitar espera longa
+                // Reconexão rápida SOMENTE se o bot estava conectado antes
+                // Se estava no QR (nunca conectou), reconectar rápido só cria loop infinito
+                // 408: Timeout | 428: Precondition Required | 515: Stream Error
+                if ((statusCode === 408 || statusCode === 428 || statusCode === 515) && jaTeveConexao) {
+                    logger.warn(`[RECONNECT] Erro ${statusCode} detectado (tinha conexao). Reconexao imediata...`);
                     setTimeout(iniciarWhatsApp, 1000);
                     return;
                 }
