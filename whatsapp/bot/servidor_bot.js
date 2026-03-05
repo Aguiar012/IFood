@@ -141,7 +141,7 @@ async function iniciarWhatsApp() {
                 creds: state.creds,
                 keys: makeCacheableSignalKeyStore(state.keys, logger),
             },
-            logger: P({ level: "silent" }), // Silencia logs internos do Baileys
+            logger: P({ level: "warn", transport: { target: 'pino-pretty', options: { colorize: true } } }), // Mostra warn/error do Baileys (para diagnóstico de mídia)
             printQRInTerminal: false, // DESATIVADO (Deprecated) - Usaremos qrcode-terminal
             browser: ["IF Food Bot", "Chrome", "1.0.0"],
             agent: agenteProxy,
@@ -428,37 +428,53 @@ async function iniciarWhatsApp() {
                                 // Baileys criptografa em /tmp/ e pode falhar no upload
                                 if (payload.image || payload.video || payload.document) {
                                     const mediaData = payload.image || payload.video || payload.document;
-                                    logger.info(`[MEDIA] Enviando mídia: tipo=${payload.image ? 'image' : payload.video ? 'video' : 'doc'}, isBuffer=${Buffer.isBuffer(mediaData)}, tamanho=${Buffer.isBuffer(mediaData) ? mediaData.length : typeof mediaData}`);
+                                    const mediaKey = payload.image ? 'image' : payload.video ? 'video' : 'document';
+                                    logger.info(`[MEDIA] Enviando mídia: tipo=${mediaKey}, isBuffer=${Buffer.isBuffer(mediaData)}, tamanho=${Buffer.isBuffer(mediaData) ? mediaData.length : typeof mediaData}`);
 
-                                    // Diagnóstico: lista arquivos em /tmp antes do envio
+                                    let enviado = false;
+
+                                    // Tentativa 1: Buffer direto (método padrão)
                                     try {
-                                        const tmpFiles = fs.readdirSync("/tmp").filter(f => f.includes("-enc") || f.includes("image"));
-                                        logger.info(`[MEDIA] Arquivos em /tmp antes: ${tmpFiles.length > 0 ? tmpFiles.join(", ") : "(vazio)"}`);
-                                    } catch (e) { logger.warn(`[MEDIA] Erro ao listar /tmp: ${e.message}`); }
+                                        await socket.sendMessage(jid, payload);
+                                        enviado = true;
+                                    } catch (err1) {
+                                        logger.warn(`[MEDIA] Tentativa 1 (buffer) falhou: ${err1.message}`);
+                                    }
 
-                                    let tentativas = 0;
-                                    const MAX_TENT = 2;
-                                    while (tentativas < MAX_TENT) {
+                                    // Tentativa 2: Salvar como arquivo e enviar via file path
+                                    if (!enviado && Buffer.isBuffer(mediaData)) {
                                         try {
-                                            await socket.sendMessage(jid, payload);
-                                            break; // Sucesso
-                                        } catch (erroMidia) {
-                                            tentativas++;
-                                            // Diagnóstico: lista /tmp após falha
-                                            try {
-                                                const tmpFiles = fs.readdirSync("/tmp").filter(f => f.includes("-enc") || f.includes("image"));
-                                                logger.warn(`[MEDIA] /tmp após falha: ${tmpFiles.length > 0 ? tmpFiles.join(", ") : "(vazio)"}`);
-                                            } catch (_) { }
-                                            if (tentativas >= MAX_TENT) {
-                                                logger.error(`[MEDIA] Falha ao enviar midia apos ${MAX_TENT} tentativas: ${erroMidia.message || erroMidia}`);
-                                                // Fallback: envia como texto se for imagem com caption
-                                                if (payload.caption) {
-                                                    await socket.sendMessage(jid, { text: payload.caption + "\n\n_(imagem indisponível no momento)_" });
-                                                }
-                                            } else {
-                                                logger.warn(`[MEDIA] Tentativa ${tentativas}/${MAX_TENT} falhou, retentando em 1s...`);
-                                                await new Promise(r => setTimeout(r, 1000));
-                                            }
+                                            const tmpFile = path.join(require("os").tmpdir(), `media_${Date.now()}.png`);
+                                            fs.writeFileSync(tmpFile, mediaData);
+                                            logger.info(`[MEDIA] Tentativa 2: arquivo salvo em ${tmpFile} (${mediaData.length} bytes)`);
+                                            const payloadFile = { ...payload, [mediaKey]: { url: tmpFile } };
+                                            await socket.sendMessage(jid, payloadFile);
+                                            enviado = true;
+                                            try { fs.unlinkSync(tmpFile); } catch { }
+                                        } catch (err2) {
+                                            logger.warn(`[MEDIA] Tentativa 2 (arquivo) falhou: ${err2.message}`);
+                                        }
+                                    }
+
+                                    // Tentativa 3: base64 data URL
+                                    if (!enviado && Buffer.isBuffer(mediaData)) {
+                                        try {
+                                            const b64 = mediaData.toString("base64");
+                                            const dataUrl = `data:image/png;base64,${b64}`;
+                                            logger.info(`[MEDIA] Tentativa 3: data URL (${b64.length} chars)`);
+                                            const payloadB64 = { ...payload, [mediaKey]: { url: dataUrl } };
+                                            await socket.sendMessage(jid, payloadB64);
+                                            enviado = true;
+                                        } catch (err3) {
+                                            logger.warn(`[MEDIA] Tentativa 3 (base64) falhou: ${err3.message}`);
+                                        }
+                                    }
+
+                                    // Fallback final: envia caption como texto
+                                    if (!enviado) {
+                                        logger.error(`[MEDIA] Todas as tentativas falharam para mídia`);
+                                        if (payload.caption) {
+                                            await socket.sendMessage(jid, { text: payload.caption + "\n\n_(imagem indisponível no momento)_" });
                                         }
                                     }
                                 } else {
@@ -547,9 +563,24 @@ app.listen(PORTA, () => {
         const tmpTest = path.join(require("os").tmpdir(), "_baileys_test_" + Date.now());
         fs.writeFileSync(tmpTest, "ok");
         fs.unlinkSync(tmpTest);
-        logger.info(`[DIAG] /tmp gravável: OK (tmpdir=${require("os").tmpdir()})`);
+        logger.info(`[DIAG] /tmp gravável (writeFileSync): OK (tmpdir=${require("os").tmpdir()})`);
     } catch (e) {
         logger.error(`[DIAG] /tmp NÃO gravável! ${e.message}`);
+    }
+    // Teste com createWriteStream (igual ao Baileys)
+    try {
+        const { createWriteStream: cws } = await import("fs");
+        const { once: onceEvt } = await import("events");
+        const tmpTest2 = path.join(require("os").tmpdir(), "_baileys_stream_test_" + Date.now());
+        const ws = cws(tmpTest2);
+        ws.write("test-data");
+        ws.end();
+        await onceEvt(ws, "finish");
+        const stat = fs.statSync(tmpTest2);
+        logger.info(`[DIAG] /tmp gravável (createWriteStream): OK (size=${stat.size})`);
+        fs.unlinkSync(tmpTest2);
+    } catch (e) {
+        logger.error(`[DIAG] /tmp createWriteStream FALHOU! ${e.message}`);
     }
     try {
         const mediaSrc = fs.readFileSync(
