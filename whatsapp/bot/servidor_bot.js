@@ -123,7 +123,8 @@ async function iniciarWhatsApp() {
         const { state, saveCreds } = await useMultiFileAuthState(DIRETORIO_AUTH);
         const { version } = await fetchLatestBaileysVersion();
 
-        let agenteProxy;
+        let agenteProxy;      // http.Agent para WebSocket
+        let agenteProxyFetch; // undici.ProxyAgent para fetch() nativo (upload de mídia)
         if (URL_PROXY) {
             const { HttpsProxyAgent } = await import("https-proxy-agent");
             agenteProxy = new HttpsProxyAgent(URL_PROXY, {
@@ -131,6 +132,16 @@ async function iniciarWhatsApp() {
                 keepAlive: true,
                 scheduling: 'lifo'
             });
+            // O fetch() nativo do Node.js usa undici internamente.
+            // HttpsProxyAgent (http.Agent) NÃO funciona como dispatcher do fetch().
+            // Precisamos de undici.ProxyAgent para upload de mídia funcionar com proxy.
+            try {
+                const { ProxyAgent } = await import("undici");
+                agenteProxyFetch = new ProxyAgent(URL_PROXY);
+                logger.info("[PROXY] undici.ProxyAgent criado para fetch (upload de mídia)");
+            } catch (e) {
+                logger.warn(`[PROXY] undici não disponível, upload de mídia sem proxy: ${e.message}`);
+            }
         }
 
         logger.info(`🚀 Iniciando WhatsApp v${version.join('.')} ...`);
@@ -145,7 +156,7 @@ async function iniciarWhatsApp() {
             printQRInTerminal: false, // DESATIVADO (Deprecated) - Usaremos qrcode-terminal
             browser: ["IF Food Bot", "Chrome", "1.0.0"],
             agent: agenteProxy,
-            fetchAgent: agenteProxy,
+            fetchAgent: agenteProxyFetch, // undici.ProxyAgent para fetch() nativo (upload de mídia)
 
             // --- CONFIGURAÇÕES DE ESTABILIDADE ---
             connectTimeoutMs: 120_000,        // 2 minutos para conectar (aumentado)
