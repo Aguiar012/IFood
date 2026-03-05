@@ -427,6 +427,15 @@ async function iniciarWhatsApp() {
                                 // Retry para envio de mídia (imagem/vídeo/documento)
                                 // Baileys criptografa em /tmp/ e pode falhar no upload
                                 if (payload.image || payload.video || payload.document) {
+                                    const mediaData = payload.image || payload.video || payload.document;
+                                    logger.info(`[MEDIA] Enviando mídia: tipo=${payload.image ? 'image' : payload.video ? 'video' : 'doc'}, isBuffer=${Buffer.isBuffer(mediaData)}, tamanho=${Buffer.isBuffer(mediaData) ? mediaData.length : typeof mediaData}`);
+
+                                    // Diagnóstico: lista arquivos em /tmp antes do envio
+                                    try {
+                                        const tmpFiles = fs.readdirSync("/tmp").filter(f => f.includes("-enc") || f.includes("image"));
+                                        logger.info(`[MEDIA] Arquivos em /tmp antes: ${tmpFiles.length > 0 ? tmpFiles.join(", ") : "(vazio)"}`);
+                                    } catch (e) { logger.warn(`[MEDIA] Erro ao listar /tmp: ${e.message}`); }
+
                                     let tentativas = 0;
                                     const MAX_TENT = 2;
                                     while (tentativas < MAX_TENT) {
@@ -435,6 +444,11 @@ async function iniciarWhatsApp() {
                                             break; // Sucesso
                                         } catch (erroMidia) {
                                             tentativas++;
+                                            // Diagnóstico: lista /tmp após falha
+                                            try {
+                                                const tmpFiles = fs.readdirSync("/tmp").filter(f => f.includes("-enc") || f.includes("image"));
+                                                logger.warn(`[MEDIA] /tmp após falha: ${tmpFiles.length > 0 ? tmpFiles.join(", ") : "(vazio)"}`);
+                                            } catch (_) { }
                                             if (tentativas >= MAX_TENT) {
                                                 logger.error(`[MEDIA] Falha ao enviar midia apos ${MAX_TENT} tentativas: ${erroMidia.message || erroMidia}`);
                                                 // Fallback: envia como texto se for imagem com caption
@@ -554,6 +568,7 @@ app.listen(PORTA, () => {
 // --- TRATAMENTO DE ERROS GLOBAIS ---
 process.on("uncaughtException", e => {
     logger.error("[UNCAUGHT] Erro Nao Capturado: " + e);
+    if (e?.stack) logger.error("[STACK] " + e.stack);
     // Não deixa o processo morrer
 });
 process.on("unhandledRejection", e => {
