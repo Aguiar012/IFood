@@ -99,6 +99,26 @@ let aguardandoQR = false; // Indica se está esperando scan de QR
 // Atualiza timestamp de atividade
 function registrarAtividade() { ultimaAtividade = Date.now(); }
 
+// --- PROXY: cria UMA VEZ (reutilizado em todas as reconexões) ---
+let agenteProxy;      // http.Agent para WebSocket
+let agenteProxyFetch; // undici.ProxyAgent para fetch() nativo (upload de mídia)
+if (URL_PROXY) {
+    const { HttpsProxyAgent } = await import("https-proxy-agent");
+    agenteProxy = new HttpsProxyAgent(URL_PROXY, {
+        timeout: 60000,
+        keepAlive: true,
+        scheduling: 'lifo'
+    });
+    try {
+        const { ProxyAgent } = await import("undici");
+        agenteProxyFetch = new ProxyAgent(URL_PROXY);
+        logger.info("[PROXY] undici.ProxyAgent criado para fetch (upload de mídia)");
+    } catch (e) {
+        logger.warn(`[PROXY] undici não disponível, upload de mídia sem proxy: ${e.message}`);
+    }
+    logger.info(`[PROXY] Proxy configurado: ${URL_PROXY.replace(/:[^:@]+@/, ':***@')}`);
+}
+
 // === INICIAR WHATSAPP ===
 async function iniciarWhatsApp() {
     try {
@@ -122,27 +142,6 @@ async function iniciarWhatsApp() {
         logger.info(`[AUTH] Salvando credenciais em: ${DIRETORIO_AUTH}`);
         const { state, saveCreds } = await useMultiFileAuthState(DIRETORIO_AUTH);
         const { version } = await fetchLatestBaileysVersion();
-
-        let agenteProxy;      // http.Agent para WebSocket
-        let agenteProxyFetch; // undici.ProxyAgent para fetch() nativo (upload de mídia)
-        if (URL_PROXY) {
-            const { HttpsProxyAgent } = await import("https-proxy-agent");
-            agenteProxy = new HttpsProxyAgent(URL_PROXY, {
-                timeout: 60000,
-                keepAlive: true,
-                scheduling: 'lifo'
-            });
-            // O fetch() nativo do Node.js usa undici internamente.
-            // HttpsProxyAgent (http.Agent) NÃO funciona como dispatcher do fetch().
-            // Precisamos de undici.ProxyAgent para upload de mídia funcionar com proxy.
-            try {
-                const { ProxyAgent } = await import("undici");
-                agenteProxyFetch = new ProxyAgent(URL_PROXY);
-                logger.info("[PROXY] undici.ProxyAgent criado para fetch (upload de mídia)");
-            } catch (e) {
-                logger.warn(`[PROXY] undici não disponível, upload de mídia sem proxy: ${e.message}`);
-            }
-        }
 
         logger.info(`🚀 Iniciando WhatsApp v${version.join('.')} ...`);
 
@@ -214,7 +213,8 @@ async function iniciarWhatsApp() {
                 jaTeveConexao = true;
                 registrarAtividade();
 
-                // Heartbeat: envia sinal de vida a cada 5 min para evitar erro 428 (Precondition Required)
+                // Heartbeat: envia sinal de vida a cada 2 min para evitar erro 428 (Precondition Required)
+                // Proxy pode dropar conexões ociosas — precisa ser frequente
                 // Limpa heartbeat anterior para evitar múltiplos intervalos acumulados
                 if (intervaloHeartbeat) {
                     clearInterval(intervaloHeartbeat);
@@ -227,7 +227,7 @@ async function iniciarWhatsApp() {
                         });
                         registrarAtividade(); // Heartbeat bem-sucedido conta como atividade
                     }
-                }, 300_000);
+                }, 120_000);
 
                 // --- WATCHDOG: Detecta conexões zumbi ---
                 // A cada 3 minutos, verifica se o socket ainda responde de verdade
@@ -339,12 +339,14 @@ async function iniciarWhatsApp() {
                 // 5. Outros erros: reconexão
                 const statusCode = (lastDisconnect?.error)?.output?.statusCode;
 
-                // Reconexão rápida SOMENTE se o bot estava conectado antes
-                // Se estava no QR (nunca conectou), reconectar rápido só cria loop infinito
+                // Reconexão com delay seguro para evitar cascata de badSession (500)
+                // Se reconectar muito rápido, o WhatsApp ainda não liberou a sessão anterior
                 // 408: Timeout | 428: Precondition Required | 515: Stream Error
                 if ((statusCode === 408 || statusCode === 428 || statusCode === 515) && jaTeveConexao) {
-                    logger.warn(`[RECONNECT] Erro ${statusCode} detectado (tinha conexao). Reconexao imediata...`);
-                    setTimeout(iniciarWhatsApp, 1000);
+                    const delayReconexao = 5000; // 5s — dá tempo do WhatsApp liberar a sessão
+                    logger.warn(`[RECONNECT] Erro ${statusCode} detectado (tinha conexao). Reconexao em ${delayReconexao / 1000}s...`);
+                    registrarAtividade();
+                    setTimeout(iniciarWhatsApp, delayReconexao);
                     return;
                 }
 
