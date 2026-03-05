@@ -567,18 +567,25 @@ app.listen(PORTA, () => {
     } catch (e) {
         logger.error(`[DIAG] /tmp NÃO gravável! ${e.message}`);
     }
-    // Teste com createWriteStream (igual ao Baileys)
+    // Teste com createWriteStream (igual ao Baileys) — usa callback pois app.listen não é async
     try {
-        const { createWriteStream: cws } = await import("fs");
-        const { once: onceEvt } = await import("events");
+        const { createWriteStream: cws } = require("fs");
         const tmpTest2 = path.join(require("os").tmpdir(), "_baileys_stream_test_" + Date.now());
         const ws = cws(tmpTest2);
         ws.write("test-data");
         ws.end();
-        await onceEvt(ws, "finish");
-        const stat = fs.statSync(tmpTest2);
-        logger.info(`[DIAG] /tmp gravável (createWriteStream): OK (size=${stat.size})`);
-        fs.unlinkSync(tmpTest2);
+        ws.on("finish", () => {
+            try {
+                const stat = fs.statSync(tmpTest2);
+                logger.info(`[DIAG] /tmp gravável (createWriteStream): OK (size=${stat.size})`);
+                fs.unlinkSync(tmpTest2);
+            } catch (e2) {
+                logger.error(`[DIAG] /tmp createWriteStream stat FALHOU! ${e2.message}`);
+            }
+        });
+        ws.on("error", (e2) => {
+            logger.error(`[DIAG] /tmp createWriteStream ERRO no stream! ${e2.message}`);
+        });
     } catch (e) {
         logger.error(`[DIAG] /tmp createWriteStream FALHOU! ${e.message}`);
     }
