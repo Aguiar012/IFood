@@ -1,6 +1,7 @@
 // assistente_ia.js
 // Assistente IA usando Gemini 2.5 Flash Lite.
-// Classifica intencoes E responde duvidas com contexto do usuario.
+// Classifica intencoes, responde duvidas com contexto do usuario,
+// e sugere pratos para bloquear baseado no cardapio do IFSP.
 // Usado SOMENTE como fallback quando nenhum comando padrao bate.
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -9,6 +10,65 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 const LIMITE_POR_USUARIO = 5;   // chamadas IA por usuario por dia
 const LIMITE_GLOBAL_DIARIO = 15; // chamadas IA total por dia (RPD = 20, reserva 5)
 const NOME_MODELO = "gemini-2.5-flash-lite";
+
+// Pratos comuns do refeitório IFSP (baseado nos cardápios reais)
+const PRATOS_CARDAPIO_IFSP = [
+    "frango", "frango assado", "filé de frango", "frango grelhado", "frango empanado",
+    "carne moída", "carne bovina", "bife", "bife acebolado", "carne assada", "carne de panela",
+    "peixe", "filé de peixe", "tilápia", "merluza", "peixe empanado",
+    "linguiça", "linguiça toscana", "linguiça calabresa",
+    "fígado", "fígado bovino", "fígado acebolado",
+    "ovo", "ovo frito", "ovo mexido", "omelete",
+    "salsicha", "salsichão",
+    "porco", "lombo", "bisteca", "pernil",
+    "estrogonofe", "estrogonofe de frango", "estrogonofe de carne",
+    "almôndega", "almôndega ao molho",
+    "carne seca", "carne seca acebolada",
+    "calabresa", "calabresa acebolada",
+    "isca de frango", "isca de carne",
+    "dobradinha",
+    "rabada",
+    "mocotó",
+    "panqueca", "panqueca de carne",
+    "torta", "torta de frango",
+    "escondidinho",
+    "macarrão", "macarronada",
+    "feijoada",
+    "arroz carreteiro",
+    "virado a paulista",
+    "baião de dois"
+];
+
+const PROMPT_SUGESTAO_BLOQUEIOS = `Voce sugere pratos para um aluno bloquear no refeitorio do IFSP.
+
+O aluno acabou de bloquear alguns pratos. Sugira OUTROS pratos do cardapio que ele TALVEZ tambem nao coma, baseado no que ele bloqueou.
+
+REGRAS:
+- Sugira apenas pratos que fazem sentido com base no que o aluno bloqueou
+- NAO repita pratos que o aluno ja bloqueou
+- Maximo 5 sugestoes
+- Se nao houver sugestoes logicas, responda: NENHUMA
+- Responda APENAS com os nomes dos pratos, um por linha, sem numeracao e sem explicacao
+- Use nomes curtos e simples (ex: "tilapia" em vez de "file de tilapia grelhado ao molho")
+
+EXEMPLOS:
+Aluno bloqueou: peixe
+Sugestoes:
+tilapia
+merluza
+
+Aluno bloqueou: carne moida
+Sugestoes:
+almondega
+estrogonofe de carne
+carne seca
+
+Aluno bloqueou: salada
+Sugestoes:
+NENHUMA
+
+PRATOS COMUNS DO CARDAPIO IFSP (use como referencia):
+${PRATOS_CARDAPIO_IFSP.join(", ")}`;
 
 const COMANDOS_VALIDOS = [
     "cancelar", "status", "historico",
@@ -170,13 +230,14 @@ function gerarContextoUsuario(dadosUsuario) {
  * Cria o assistente IA.
  * @param {string} chaveApi - Chave da API do Gemini
  * @param {object} logger - Logger (console ou pino)
- * @returns {{ classificarIntencao: Function }}
+ * @returns {{ classificarIntencao: Function, sugerirBloqueios: Function }}
  */
 export function criarAssistenteIA(chaveApi, logger = console) {
     if (!chaveApi) {
         logger.warn("GEMINI_API_KEY nao definida. IA desabilitada.");
         return {
-            classificarIntencao: async () => ({ tipo: "nada", valor: null })
+            classificarIntencao: async () => ({ tipo: "nada", valor: null }),
+            sugerirBloqueios: async () => ([])
         };
     }
 
@@ -254,5 +315,64 @@ export function criarAssistenteIA(chaveApi, logger = console) {
         }
     }
 
-    return { classificarIntencao };
+    /**
+     * Sugere pratos adicionais para bloquear baseado nos que o aluno escolheu.
+     * NAO conta no rate limit do usuario (é chamada pelo sistema, não pelo aluno).
+     * @param {string[]} itensBloqueados - Pratos que o aluno acabou de bloquear
+     * @returns {Promise<string[]>} Lista de sugestões (pode ser vazia)
+     */
+    async function sugerirBloqueios(itensBloqueados) {
+        if (!itensBloqueados || !itensBloqueados.length) return [];
+
+        // Verifica apenas o limite global (não queremos estourar a cota)
+        resetarSeNovoDia(contadorGlobal);
+        if (contadorGlobal.quantidade >= LIMITE_GLOBAL_DIARIO) {
+            logger.info("[IA] Limite global atingido, pulando sugestão de bloqueios.");
+            return [];
+        }
+
+        const prompt = `O aluno bloqueou: ${itensBloqueados.join(", ")}\nSugestoes:`;
+
+        try {
+            const modeloSugestao = clienteGemini.getGenerativeModel({
+                model: NOME_MODELO,
+                generationConfig: {
+                    maxOutputTokens: 100,
+                    temperature: 0.3,
+                },
+                systemInstruction: PROMPT_SUGESTAO_BLOQUEIOS,
+            });
+
+            const resultado = await modeloSugestao.generateContent(prompt);
+            const resposta = resultado.response.text().trim();
+
+            // Conta no global (mas não no do usuario)
+            contadorGlobal.quantidade++;
+
+            // Se Gemini disse NENHUMA, retorna vazio
+            if (resposta.toUpperCase().includes("NENHUMA")) {
+                logger.info(`[IA] Sugestão bloqueios: nenhuma para [${itensBloqueados.join(", ")}]`);
+                return [];
+            }
+
+            // Extrai os nomes (um por linha, limpa espaços e numeração)
+            const sugestoes = resposta
+                .split("\n")
+                .map(l => l.replace(/^\d+[\.\)]\s*/, "").trim().toLowerCase())
+                .filter(l => l.length > 0 && l.length < 50)
+                // Remove itens que o aluno já bloqueou
+                .filter(s => !itensBloqueados.some(b =>
+                    b.toLowerCase() === s || s.includes(b.toLowerCase()) || b.toLowerCase().includes(s)
+                ))
+                .slice(0, 5);
+
+            logger.info(`[IA] Sugestão bloqueios: [${itensBloqueados.join(", ")}] -> [${sugestoes.join(", ")}]`);
+            return sugestoes;
+        } catch (erro) {
+            logger.error(`[IA] Erro ao sugerir bloqueios: ${erro.message || erro}`);
+            return [];
+        }
+    }
+
+    return { classificarIntencao, sugerirBloqueios };
 }

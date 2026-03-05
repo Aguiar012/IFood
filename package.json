@@ -12,7 +12,8 @@
   "dependencies": {
     "@google/generative-ai": "^0.24.1",
     "@hapi/boom": "10.0.1",
-    "@whiskeysockets/baileys": "latest",
+    "@resvg/resvg-js": "^2.6.2",
+    "@whiskeysockets/baileys": "7.0.0-rc.9",
     "dotenv": "^17.2.4",
     "express": "4.19.2",
     "https-proxy-agent": "7.0.4",
@@ -24,6 +25,7 @@
     "pg": "^8.11.5",
     "pino": "9.4.0",
     "pino-pretty": "13.1.2",
-    "qrcode-terminal": "0.12.0"
+    "qrcode-terminal": "0.12.0",
+    "satori": "^0.19.2"
   }
 }

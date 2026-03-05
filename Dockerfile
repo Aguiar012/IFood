@@ -1,5 +1,8 @@
 FROM node:20-alpine
 
+# Fontes para renderização de imagem (satori/resvg)
+RUN apk add --no-cache fontconfig ttf-liberation
+
 # Cria diretorio de trabalho
 WORKDIR /app
 
@@ -15,8 +18,6 @@ COPY . .
 # Cria diretorio para persistencia (auth)
 RUN mkdir -p dados_bot/auth
 
-# Expose se tiver servidor web (opcional, mas bom pra health check)
 EXPOSE 3001
 
-# Comando de inicio
 CMD ["npm", "start"]

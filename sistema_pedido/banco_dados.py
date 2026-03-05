@@ -62,6 +62,29 @@ def buscar_alunos_para_dia(dia_da_semana: int) -> list[dict]:
         logging.error(f"❌ Erro no banco ao buscar alunos: {e}")
         return []
 
+def buscar_telefone_aluno(aluno_id: int) -> str | None:
+    """
+    Busca o número de telefone vinculado a um aluno na tabela contato.
+    Retorna o primeiro telefone encontrado ou None.
+    """
+    if not URL_BANCO_DADOS:
+        return None
+
+    try:
+        with psycopg.connect(URL_BANCO_DADOS) as conexao:
+            with conexao.cursor() as cursor:
+                cursor.execute("""
+                    SELECT telefone
+                      FROM contato
+                     WHERE aluno_id = %s
+                     LIMIT 1;
+                """, (aluno_id,))
+                resultado = cursor.fetchone()
+                return resultado[0] if resultado else None
+    except Exception as e:
+        logging.error(f"Erro ao buscar telefone do aluno {aluno_id}: {e}")
+        return None
+
 def buscar_pratos_bloqueados(prontuario: str) -> list[str]:
     """Retorna lista de nomes de pratos que o aluno bloqueou."""
     if not URL_BANCO_DADOS:
@@ -122,3 +145,25 @@ def atualizar_prato_dia(data_referencia, nome_prato: str):
             conexao.commit()
     except Exception as e:
         logging.error(f"❌ Erro ao salvar prato do dia no banco: {e}")
+
+def buscar_prato_por_data(data_referencia) -> str | None:
+    """
+    Busca o prato salvo no banco para uma data específica.
+    Retorna o nome do prato ou None se não encontrado.
+    """
+    if not URL_BANCO_DADOS:
+        return None
+
+    try:
+        with psycopg.connect(URL_BANCO_DADOS) as conexao:
+            with conexao.cursor() as cursor:
+                cursor.execute("""
+                    SELECT prato_nome
+                      FROM proximo_prato
+                     WHERE dia_referente = %s;
+                """, (data_referencia,))
+                resultado = cursor.fetchone()
+                return resultado[0] if resultado else None
+    except Exception as e:
+        logging.error(f"Erro ao buscar prato por data {data_referencia}: {e}")
+        return None

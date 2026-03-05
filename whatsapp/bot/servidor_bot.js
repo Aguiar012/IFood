@@ -307,9 +307,14 @@ async function iniciarWhatsApp() {
                 // 4. Credenciais inválidas — tenta reconectar SEM apagar auth
                 // (Apagar auth destrói a sessão permanentemente e exige novo QR)
                 if (status === DisconnectReason.badSession) {
-                    logger.error("[BAD_SESSION] SESSAO COM PROBLEMA! Tentando reconectar sem apagar credenciais...");
                     tentativasReconexao++;
-                    const tempoEspera = Math.min(5000 * tentativasReconexao, 30000);
+                    // Backoff mais longo: 30s, 60s, 90s, 120s (max 2 min)
+                    // BadSession geralmente é instabilidade temporária do WhatsApp server
+                    const tempoEspera = Math.min(30000 * tentativasReconexao, 120000);
+                    logger.error(`[BAD_SESSION] SESSAO COM PROBLEMA! Reconectando em ${tempoEspera / 1000}s (tentativa #${tentativasReconexao})...`);
+                    // Registra atividade para o health check não matar o processo
+                    // enquanto estamos ativamente tentando reconectar
+                    registrarAtividade();
                     setTimeout(iniciarWhatsApp, tempoEspera);
                     return;
                 }
@@ -327,6 +332,7 @@ async function iniciarWhatsApp() {
                 }
 
                 tentativasReconexao++;
+                registrarAtividade(); // Evita health check matar durante reconexão ativa
 
                 // Se muitas tentativas rápidas, espera mais tempo
                 let tempoEspera = 3000; // 3 segundos padrão

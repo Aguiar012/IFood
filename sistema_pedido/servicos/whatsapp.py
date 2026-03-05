@@ -59,3 +59,22 @@ def notificar_administradores(mensagem: str):
         if not enviado:
             logging.error(f"🚨 FALHA TOTAL: Não conseguiu notificar {numero} após {MAX_TENTATIVAS} tentativas!")
 
+def enviar_mensagem_aluno(telefone: str, mensagem: str):
+    """
+    Envia uma mensagem para um aluno específico via API do bot WhatsApp.
+    Usa apenas 1 tentativa — se falhar, só loga (não é crítico).
+    """
+    if not URL_BOT_WHATSAPP or not telefone:
+        return
+
+    try:
+        payload = {"number": telefone, "message": mensagem}
+        resposta = requests.post(URL_BOT_WHATSAPP, json=payload, timeout=15)
+
+        if resposta.status_code == 200:
+            logging.info(f"📱 Mensagem enviada para aluno {telefone}")
+        else:
+            logging.warning(f"⚠️ Falha ao enviar para {telefone}: {resposta.status_code}")
+    except Exception as e:
+        logging.warning(f"⚠️ Erro ao enviar mensagem para {telefone}: {e}")
+

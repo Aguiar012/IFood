@@ -12,11 +12,12 @@ from sistema_pedido.cliente_site import (
     buscar_cardapio_site, realizar_pedido, validar_erro_relevante
 )
 from sistema_pedido.banco_dados import (
-    buscar_alunos_para_dia, buscar_pratos_bloqueados, 
-    registrar_historico_pedido, buscar_cancelamento_direto
+    buscar_alunos_para_dia, buscar_pratos_bloqueados,
+    registrar_historico_pedido, buscar_cancelamento_direto,
+    buscar_telefone_aluno
 )
 from sistema_pedido.servicos.email import enviar_email
-from sistema_pedido.servicos.whatsapp import notificar_administradores
+from sistema_pedido.servicos.whatsapp import notificar_administradores, enviar_mensagem_aluno
 
 def principal():
     """Função principal que gerencia todo o processo de pedidos."""
@@ -26,16 +27,19 @@ def principal():
     # Cria uma sessão HTTP para manter cookies (importante para o CSRF token)
     sessao = requests.Session()
 
-    # 1. Atualiza o cardápio no banco e descobre o prato do dia
-    texto_prato_dia = buscar_cardapio_site(sessao)
-    
-    # 2. Calcula para qual data vamos fazer os pedidos
+    # 1. Calcula para qual data vamos fazer os pedidos
     data_pedido = data_alvo_pedido(agora)
     dia_semana_iso = data_pedido.isoweekday()
     nome_dia_semana = DIAS_SEMANA_PT.get(dia_semana_iso, 'dia-desconhecido')
 
     logging.info(f"📅 Data alvo do pedido: {data_pedido} ({nome_dia_semana})")
-    logging.info(f"🍛 Texto usado para checar bloqueios: {texto_prato_dia}")
+
+    # 2. Atualiza o cardápio no banco e descobre o prato do DIA ALVO DO PEDIDO
+    # IMPORTANTE: passa data_pedido para buscar o prato correto (do dia que o aluno vai comer)
+    # e não o prato de hoje (que pode ser diferente, ex: sexta pedindo para segunda)
+    texto_prato_dia = buscar_cardapio_site(sessao, data_pedido)
+
+    logging.info(f"🍛 Texto usado para checar bloqueios (prato de {data_pedido}): {texto_prato_dia}")
 
     # Lista para guardar o relatório de execução
     detalhes_execucao = []
@@ -69,12 +73,24 @@ def principal():
             hora_inicio = datetime.now(FUSO_HORARIO).strftime('%H:%M:%S')
             time.sleep(random.randint(0, ATRASO_MAXIMO))
             hora_fim = datetime.now(FUSO_HORARIO).strftime('%H:%M:%S')
-            
+
             motivo = f'NAO_PEDIU: prato contém bloqueios -> {motivo_bloqueio}'
             logging.info(f"🚫 BLOQUEADO: {prontuario} por {motivo_bloqueio}")
-            
+
             registrar_historico_pedido(id_aluno, data_pedido, motivo)
             detalhes_execucao.append((prontuario, True, motivo, hora_inicio, hora_fim, 0))
+
+            # Avisa o aluno por WhatsApp que o pedido não foi feito
+            telefone_aluno = buscar_telefone_aluno(id_aluno)
+            if telefone_aluno:
+                data_fmt = data_pedido.strftime('%d/%m')
+                msg_aluno = (
+                    f"Oi! Seu almoço de *{nome_dia_semana}* ({data_fmt}) "
+                    f"não foi pedido porque o prato (*{texto_prato_dia}*) "
+                    f"contém item da sua lista de exclusão: *{motivo_bloqueio}*."
+                )
+                enviar_mensagem_aluno(telefone_aluno, msg_aluno)
+
             continue
 
         # 6. Tenta realizar o pedido
@@ -149,4 +165,22 @@ def principal():
         logging.info("📱 Alerta de erros enviado para o WhatsApp.")
 
 if __name__ == '__main__':
-    principal()
+    try:
+        principal()
+    except Exception as e:
+        logging.error(f"💀 ERRO FATAL: {e}")
+        # Tenta notificar admins por WhatsApp antes de morrer
+        try:
+            from sistema_pedido.servicos.whatsapp import notificar_administradores
+            from datetime import datetime
+            from sistema_pedido.configuracao import FUSO_HORARIO
+            agora = datetime.now(FUSO_HORARIO).strftime('%d/%m %H:%M')
+            notificar_administradores(
+                f"💀 *ERRO FATAL no Auto-Almoço*\n"
+                f"{agora}\n\n"
+                f"O script quebrou antes de terminar:\n"
+                f"```{str(e)[:500]}```"
+            )
+        except Exception:
+            logging.error("Não conseguiu enviar alerta de erro fatal por WhatsApp.")
+        raise  # Re-lança o erro para o GitHub Actions registrar o exit code 1

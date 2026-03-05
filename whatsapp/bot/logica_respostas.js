@@ -4,6 +4,7 @@ import pkg from "pg";
 const { Pool } = pkg;
 import nodemailer from "nodemailer";
 import { criarAssistenteIA } from "./inteligencia_artificial.js";
+import { gerarImagemEmailCancelamento } from "./renderizar_email.js";
 
 function apenasDigitos(s = "") { return (s || "").replace(/\D/g, ""); }
 
@@ -453,7 +454,9 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
     const pool = new Pool({
         connectionString: urlBanco,
         max: 5,
-        idleTimeoutMillis: 30_000
+        idleTimeoutMillis: 60_000,
+        connectionTimeoutMillis: 10_000,
+        statement_timeout: 30_000,
     });
 
     async function conectarBanco(funcao) {
@@ -690,9 +693,14 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         return rows;
     }
 
-    // Busca pedidos da semana atual (seg a sex) para a tabela visual
+    // Busca pedidos da semana visualizada (seg a sex) para a tabela visual
+    // Se for Sab/Dom, busca da PRÓXIMA semana (mesma lógica de gerarCabecalho)
     async function buscarPedidosSemanaAtual(c, alunoId) {
-        const segunda = obterSegundaDaSemana(new Date());
+        const agora = new Date();
+        const segunda = obterSegundaDaSemana(agora);
+        if (agora.getDay() === 0 || agora.getDay() === 6) {
+            segunda.setDate(segunda.getDate() + 7);
+        }
         const sexta = new Date(segunda);
         sexta.setDate(segunda.getDate() + 4);
         const { rows } = await c.query(
@@ -709,17 +717,18 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
     }
 
     async function obterPratoAtual(c) {
-        // Nova Lógica: 
+        // Nova Lógica:
         // Antes das 12:30 -> Tenta pegar cardápio de HOJE
         // Depois das 12:30 -> Tenta pegar cardápio do PRÓXIMO DIA ÚTIL
-        const agora = new Date();
-        const corte = new Date(agora);
-        corte.setHours(12, 30, 0, 0);
+        // Usa horário de São Paulo explicitamente para não depender de TZ do container
+        const agoraSP = new Date(new Date().toLocaleString("en-US", { timeZone: "America/Sao_Paulo" }));
+        const horaSP = agoraSP.getHours();
+        const minutoSP = agoraSP.getMinutes();
 
-        let dataAlvo = new Date(agora);
+        let dataAlvo = new Date(agoraSP);
 
-        // Se já passou do almoço de hoje, foca em amanhã
-        if (agora > corte) {
+        // Se já passou das 12:30 em SP, foca em amanhã
+        if (horaSP > 12 || (horaSP === 12 && minutoSP >= 30)) {
             dataAlvo.setDate(dataAlvo.getDate() + 1);
         }
 
@@ -890,8 +899,12 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         const MAPA_NUMEROS = {
             "1": "cancelar", "2": "status", "3": "historico",
             "4": "preferencia", "5": "bloquear", "6": "desbloquear",
-            "7": "ativar", "8": "guia"
+            "7": null, "8": "guia" // 7 é tratado como toggle abaixo
         };
+        if (textoNorm === "7" && usuario.etapa === "MENU_PRINCIPAL") {
+            // Toggle: se está ativo → desativa, se inativo → ativa
+            return processarTexto(jid, aluno?.ativo ? "desativar" : "ativar");
+        }
         if (MAPA_NUMEROS[textoNorm] && usuario.etapa === "MENU_PRINCIPAL") {
             return processarTexto(jid, MAPA_NUMEROS[textoNorm]);
         }
@@ -974,7 +987,11 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
                 });
 
                 if (!res.ok) {
-                    if (res.motivo === "NAO_ENCONTRADO") return criarBotoes("Prontuário não encontrado na base.", "", [{ id: "continuar_cadastro", texto: "Tentar De Novo" }]);
+                    if (res.motivo === "NAO_ENCONTRADO") return criarBotoes(
+                        "Prontuário não encontrado na base.\n\n" +
+                        "Se você acha que deveria estar cadastrado, procure a sala do *3° Redes* para regularizar.",
+                        "", [{ id: "continuar_cadastro", texto: "Tentar De Novo" }]
+                    );
                     if (res.motivo === "JA_VINCULADO") return criarTexto("Prontuário já vinculado a outro número.");
                     return criarTexto("Erro no sistema.");
                 }
@@ -1000,8 +1017,66 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             const itens = texto.split(/[,;\n]+/).map(limparTexto).filter(Boolean);
             if (!itens.length) return criarTexto("Envie os nomes dos pratos (ex: peixe, figado).");
             await conectarBanco(c => salvarBloqueios(c, alunoAtual.id, itens));
+
+            // Pede sugestões ao Gemini (não bloqueia se falhar)
+            try {
+                const sugestoes = await assistenteIA.sugerirBloqueios(itens);
+                if (sugestoes.length > 0) {
+                    atualizarUsuario(chaveUsuario, {
+                        etapa: "CONFIRMAR_SUGESTOES_BLOQUEIO",
+                        dados_temporarios: { sugestoes, itensBloqueados: itens }
+                    });
+                    const listaSugestoes = sugestoes.map((s, i) => `${i + 1}. ${s}`).join("\n");
+                    return criarTexto(
+                        `*Bloqueios adicionados:* ${itens.join(", ")}\n\n` +
+                        `Baseado no que você bloqueou, talvez queira bloquear também:\n\n` +
+                        `${listaSugestoes}\n\n` +
+                        `Responda com os *números* das sugestões (ex: 1,3) ou *não* para pular.`
+                    );
+                }
+            } catch (e) {
+                logger.warn(`[BLOQUEIO] Erro ao buscar sugestões IA: ${e.message}`);
+            }
+
             atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
             return criarTexto(`*Bloqueios adicionados:* ${itens.join(", ")}`);
+        }
+
+        if (usuario.etapa === "CONFIRMAR_SUGESTOES_BLOQUEIO") {
+            const sugestoes = usuario.dados_temporarios?.sugestoes || [];
+            const textoResp = textoNorm;
+
+            // Se o aluno quer pular
+            if (["nao", "não", "n", "pular", "0"].includes(textoResp)) {
+                atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
+                return criarTexto("Ok, nenhuma sugestão adicionada.");
+            }
+
+            // Tenta interpretar números (ex: "1,3" ou "1 3" ou "1, 2, 3")
+            const numeros = textoResp.match(/\d+/g);
+            if (numeros && numeros.length > 0) {
+                const selecionados = numeros
+                    .map(n => parseInt(n, 10))
+                    .filter(n => n >= 1 && n <= sugestoes.length)
+                    .map(n => sugestoes[n - 1]);
+
+                if (selecionados.length > 0) {
+                    await conectarBanco(c => salvarBloqueios(c, alunoAtual.id, selecionados));
+                    atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
+                    return criarTexto(`*Bloqueios adicionados:* ${selecionados.join(", ")}`);
+                }
+            }
+
+            // Se digitou texto livre (ex: "tilapia, merluza"), salva direto
+            const itensTexto = texto.split(/[,;\n]+/).map(limparTexto).filter(Boolean);
+            if (itensTexto.length > 0) {
+                await conectarBanco(c => salvarBloqueios(c, alunoAtual.id, itensTexto));
+                atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
+                return criarTexto(`*Bloqueios adicionados:* ${itensTexto.join(", ")}`);
+            }
+
+            atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
+            return criarTexto("Ok, nenhuma sugestão adicionada.");
         }
 
         if (usuario.etapa === "REMOVER_BLOQUEIOS") {
@@ -1095,14 +1170,46 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
 
             atualizarUsuario(chaveUsuario, { etapa: "CONFIRMAR_CANCELAMENTO", dados_temporarios: { dataCancelamento: dataAlvo, metodo } });
 
-            const msg = metodo === "DIRETO"
-                ? `Deseja CANCELAR DIRETAMENTE o almoço de *${dataStr}*?`
-                : `Deseja enviar e-mail de cancelamento para *${dataStr}*?`;
+            if (metodo === "DIRETO") {
+                return criarBotoes(
+                    `Deseja CANCELAR DIRETAMENTE o almoço de *${dataStr}*?`,
+                    "Confirmação",
+                    [{ id: "confirmar_cancelamento", texto: "Sim, Cancelar" }, { id: "cancelar_abortar", texto: "Não" }]
+                );
+            }
 
-            return criarBotoes(msg, "Confirmação", [
-                { id: "confirmar_cancelamento", texto: "Sim, Cancelar" },
-                { id: "cancelar_abortar", texto: "Não" }
-            ]);
+            // Método EMAIL: gera imagem do preview do email
+            const prontBase = String(alunoAtual.prontuario || "").toUpperCase();
+            const prontCompleto = prontBase.startsWith("PT") ? prontBase : `PT${prontBase}`;
+            const prontNumerico = apenasDigitos(prontBase);
+
+            try {
+                const imgBuffer = await gerarImagemEmailCancelamento({
+                    nome: alunoAtual.nome || "Aluno",
+                    prontuarioCompleto: prontCompleto,
+                    prontuarioNumerico: prontNumerico,
+                    diaSemana: NOMES_DIAS_SEMANA[dataAlvo.getDay()],
+                    data: formatarDDMM(dataAlvo),
+                });
+
+                // Retorna array: imagem + botões (interacao_whatsapp suporta arrays)
+                return [
+                    { image: imgBuffer, caption: "📧 Este é o e-mail que será enviado ao CAE:" },
+                    criarBotoes("Confirma o envio?", "Confirmação", [
+                        { id: "confirmar_cancelamento", texto: "Sim, Enviar" },
+                        { id: "cancelar_abortar", texto: "Não" }
+                    ])
+                ];
+            } catch (erroImg) {
+                logger.warn(`[PREVIEW] Falha ao gerar imagem: ${erroImg.message}`);
+                // Fallback: texto simples se a imagem falhar
+                return criarBotoes(
+                    `Deseja enviar e-mail de cancelamento para *${dataStr}*?\n\n` +
+                    `_Aluno: ${alunoAtual.nome} | ${prontCompleto}_`,
+                    "Confirmação",
+                    [{ id: "confirmar_cancelamento", texto: "Sim, Enviar" }, { id: "cancelar_abortar", texto: "Não" }]
+                );
+            }
         }
 
         if (textoNorm.startsWith("preferencia") || textoNorm === "dias") {
@@ -1131,15 +1238,17 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         }
 
         // Ativar/Desativar
+        // IMPORTANTE: "desativar" DEVE vir antes de "ativar"
+        // porque "desativar" contém a palavra "ativar"
+        if (textoNorm.includes("desativar") || textoNorm.includes("pausar")) {
+            await conectarBanco(c => alterarStatusAtivo(c, alunoAtual.id, false));
+            atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
+            return criarTexto("Robô pausado.");
+        }
         if (textoNorm.includes("ativar")) {
             await conectarBanco(c => alterarStatusAtivo(c, alunoAtual.id, true));
             atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
             return criarTexto("Robô ativado.");
-        }
-        if (textoNorm.includes("desativar")) {
-            await conectarBanco(c => alterarStatusAtivo(c, alunoAtual.id, false));
-            atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
-            return criarTexto("Robô pausado.");
         }
 
         // -- Fallback: tenta classificar com IA (so uma vez, evitar loop) --

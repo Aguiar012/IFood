@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sistema_pedido.configuracao import (
     URL_PRINCIPAL, TEMPO_TIMEOUT, FUSO_HORARIO, HORA_CORTE, MINUTO_CORTE
 )
-from sistema_pedido.banco_dados import atualizar_prato_dia
+from sistema_pedido.banco_dados import atualizar_prato_dia, buscar_prato_por_data
 
 # Mensagens de erro que não precisamos alertar o admin (são "erros" normais de fluxo)
 PADROES_ERRO_IGNORAR = [
@@ -90,28 +90,33 @@ def _buscar_banner_por_data(banners, data_alvo, meses):
     return None
 
 
-def buscar_cardapio_site(sessao):
+def buscar_cardapio_site(sessao, data_pedido=None):
     """
     Acessa o site, le o 'Jumbotron' (banner principal) e tenta descobrir o prato do dia.
     Também salva essa informação no banco de dados para o Bot usar.
-    Tenta a data alvo primeiro (amanha se apos corte), e faz fallback para hoje.
+
+    Se data_pedido for fornecida, busca ESPECIFICAMENTE o prato dessa data
+    (para que o bloqueio compare o prato correto, não o de hoje).
+    Caso contrário, mantém comportamento antigo (busca prato de hoje/amanhã).
     """
     agora = datetime.now(FUSO_HORARIO)
     corte = agora.replace(hour=HORA_CORTE, minute=MINUTO_CORTE, second=0, microsecond=0)
 
     hoje = agora.date()
-    
-    # Decide a data principal para buscar
+
+    # Decide a data principal para buscar no site
     if agora <= corte:
-        data_alvo = hoje
+        data_alvo_site = hoje
     else:
-        data_alvo = (agora + timedelta(days=1)).date()
+        data_alvo_site = (agora + timedelta(days=1)).date()
 
     # Pula fim de semana
-    while data_alvo.isoweekday() in (6, 7):
-        data_alvo += timedelta(days=1)
+    while data_alvo_site.isoweekday() in (6, 7):
+        data_alvo_site += timedelta(days=1)
 
-    logging.info(f"Buscando cardápio no site para a data: {data_alvo}")
+    logging.info(f"Buscando cardápio no site para a data: {data_alvo_site}")
+    if data_pedido and data_pedido != data_alvo_site:
+        logging.info(f"📌 Data do PEDIDO é {data_pedido} (diferente do cardápio visível hoje)")
 
     meses = {
         'Janeiro': 1, 'Fevereiro': 2, 'Março': 3, 'Abril': 4, 'Maio': 5, 'Junho': 6,
@@ -124,30 +129,51 @@ def buscar_cardapio_site(sessao):
         soup = BeautifulSoup(resposta.text, 'html.parser')
         todos_banners = soup.select('.jumbotron')
 
-        # 1. Tenta a data alvo principal
-        banner_alvo = _buscar_banner_por_data(todos_banners, data_alvo, meses)
-        prato_encontrado = None
+        # 1. Salva TODOS os banners encontrados no banco (para uso futuro)
+        prato_por_data = {}
+        for banner in todos_banners:
+            tag_titulo = banner.find('h2', class_='display-3')
+            if not tag_titulo:
+                continue
+            texto_titulo = tag_titulo.get_text(" ", strip=True)
+            match = re.search(r'(\d{1,2})\s+de\s+([A-Za-zçÇ]+)\s+de\s+(\d{4})', texto_titulo, re.IGNORECASE)
+            if match:
+                d, nome_mes, y = match.groups()
+                mes_num = meses.get(nome_mes.capitalize())
+                if mes_num:
+                    data_banner = datetime(int(y), mes_num, int(d)).date()
+                    prato_banner = _extrair_prato_do_banner(banner)
+                    prato_por_data[data_banner] = prato_banner
+                    atualizar_prato_dia(data_banner, prato_banner)
+                    logging.info(f"Cardápio salvo -> Dia: {data_banner} | Prato: {prato_banner}")
 
-        if banner_alvo:
-            prato_encontrado = _extrair_prato_do_banner(banner_alvo)
-            logging.info(f"Cardápio encontrado -> Dia: {data_alvo} | Prato: {prato_encontrado}")
-            atualizar_prato_dia(data_alvo, prato_encontrado)
-        else:
-            logging.warning(f"Data {data_alvo} nao encontrada no site.")
-            atualizar_prato_dia(data_alvo, "Data não encontrada no site")
+        # 2. Determina qual prato retornar para checagem de bloqueios
+        # PRIORIDADE: prato da data_pedido (dia que o aluno vai comer)
+        prato_para_bloqueio = None
 
-        # 2. Fallback: se a data alvo nao e hoje, tenta tambem salvar o de hoje
-        if data_alvo != hoje and hoje.isoweekday() not in (6, 7):
-            banner_hoje = _buscar_banner_por_data(todos_banners, hoje, meses)
-            if banner_hoje:
-                prato_hoje = _extrair_prato_do_banner(banner_hoje)
-                logging.info(f"Cardápio de hoje tambem encontrado -> Dia: {hoje} | Prato: {prato_hoje}")
-                atualizar_prato_dia(hoje, prato_hoje)
-                # Se o alvo principal nao foi encontrado, usa o de hoje como referencia
-                if not prato_encontrado or "não" in prato_encontrado.lower():
-                    prato_encontrado = prato_hoje
+        if data_pedido and data_pedido in prato_por_data:
+            prato_para_bloqueio = prato_por_data[data_pedido]
+            logging.info(f"✅ Prato da data do PEDIDO ({data_pedido}) encontrado no site: {prato_para_bloqueio}")
+        elif data_pedido:
+            # Tenta buscar do banco de dados (pode ter sido salvo em execução anterior)
+            prato_banco = buscar_prato_por_data(data_pedido)
+            if prato_banco and "não" not in prato_banco.lower() and "erro" not in prato_banco.lower():
+                prato_para_bloqueio = prato_banco
+                logging.info(f"✅ Prato da data do PEDIDO ({data_pedido}) encontrado no BANCO: {prato_para_bloqueio}")
+            else:
+                logging.warning(f"⚠️ Prato da data do PEDIDO ({data_pedido}) NÃO encontrado (site nem banco). Bloqueio DESATIVADO para segurança.")
+                # Se não sabemos o prato do dia alvo, NÃO bloqueamos
+                # (melhor pedir e o aluno não comer do que não pedir e ficar sem almoço)
+                prato_para_bloqueio = None
 
-        return prato_encontrado or "(cardápio não disponível)"
+        # Fallback: se não pediu data_pedido específica, usa comportamento antigo
+        if prato_para_bloqueio is None and data_pedido is None:
+            prato_para_bloqueio = prato_por_data.get(data_alvo_site)
+            if not prato_para_bloqueio:
+                # Fallback para hoje
+                prato_para_bloqueio = prato_por_data.get(hoje)
+
+        return prato_para_bloqueio or "(cardápio não disponível)"
 
     except Exception as e:
         logging.error(f"Erro ao ler cardápio do site: {e}")
