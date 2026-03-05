@@ -67,6 +67,7 @@ let socket = null;
 let whatsappPronto = false;
 globalThis.__ultimoQR = "";
 const mensagensProcessadas = new Set();
+const locksConversa = new Map(); // Lock por JID: impede processamento concorrente da mesma conversa
 
 
 
@@ -75,6 +76,11 @@ setInterval(() => {
     if (mensagensProcessadas.size > 0) {
         logger.info(`[CACHE] Limpando ${mensagensProcessadas.size} IDs de mensagens do cache`);
         mensagensProcessadas.clear();
+    }
+    // Limpa locks de conversa órfãos (segurança contra memory leak)
+    if (locksConversa.size > 50) {
+        logger.info(`[CACHE] Limpando ${locksConversa.size} locks de conversa`);
+        locksConversa.clear();
     }
 }, 60_000);
 
@@ -401,21 +407,63 @@ async function iniciarWhatsApp() {
                     logger.info(`[MSG] Mensagem de ${jid} [${tipoMsg}]: "${texto.substring(0, 50)}..."`);
                     registrarAtividade(); // Mensagem recebida = bot está vivo
 
-                    // Feedback visual de "digitando..."
-                    await socket.sendPresenceUpdate('composing', jid);
+                    // Lock por JID: impede processamento concorrente da mesma conversa
+                    // (Baileys pode emitir messages.upsert duplicado; sem lock, duas
+                    //  chamadas a sendMessage com imagem disputam o mesmo arquivo temp em /tmp/)
+                    const lockAnterior = locksConversa.get(jid) || Promise.resolve();
+                    const processar = lockAnterior.then(async () => {
+                        // Feedback visual de "digitando..."
+                        await socket.sendPresenceUpdate('composing', jid);
 
-                    // Processa no fluxo
-                    const resposta = await fluxo.processarTexto(jid, texto, isButton);
+                        // Processa no fluxo
+                        const resposta = await fluxo.processarTexto(jid, texto, isButton);
 
-                    if (resposta) {
-                        // Suporta múltiplas mensagens (ex: imagem + botões)
-                        const mensagens = Array.isArray(resposta) ? resposta : [resposta];
-                        for (const msg of mensagens) {
-                            const payload = typeof msg === "string" ? { text: msg } : msg;
-                            await socket.sendMessage(jid, payload);
+                        if (resposta) {
+                            // Suporta múltiplas mensagens (ex: imagem + botões)
+                            const respostas = Array.isArray(resposta) ? resposta : [resposta];
+                            for (const item of respostas) {
+                                const payload = typeof item === "string" ? { text: item } : item;
+
+                                // Retry para envio de mídia (imagem/vídeo/documento)
+                                // Baileys criptografa em /tmp/ e pode falhar no upload
+                                if (payload.image || payload.video || payload.document) {
+                                    let tentativas = 0;
+                                    const MAX_TENT = 2;
+                                    while (tentativas < MAX_TENT) {
+                                        try {
+                                            await socket.sendMessage(jid, payload);
+                                            break; // Sucesso
+                                        } catch (erroMidia) {
+                                            tentativas++;
+                                            if (tentativas >= MAX_TENT) {
+                                                logger.error(`[MEDIA] Falha ao enviar midia apos ${MAX_TENT} tentativas: ${erroMidia.message || erroMidia}`);
+                                                // Fallback: envia como texto se for imagem com caption
+                                                if (payload.caption) {
+                                                    await socket.sendMessage(jid, { text: payload.caption + "\n\n_(imagem indisponível no momento)_" });
+                                                }
+                                            } else {
+                                                logger.warn(`[MEDIA] Tentativa ${tentativas}/${MAX_TENT} falhou, retentando em 1s...`);
+                                                await new Promise(r => setTimeout(r, 1000));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    await socket.sendMessage(jid, payload);
+                                }
+                            }
+                            logger.info(`[SENT] ${respostas.length} msg(s) enviada(s) para ${jid}`);
                         }
-                        logger.info(`[SENT] ${mensagens.length} msg(s) enviada(s) para ${jid}`);
-                    }
+                    }).catch(erro => {
+                        logger.error(`[ERROR] Erro ao processar mensagem: ${erro}`);
+                    }).finally(() => {
+                        // Remove lock só se for o nosso (não remove lock de msg posterior)
+                        if (locksConversa.get(jid) === processar) {
+                            locksConversa.delete(jid);
+                        }
+                    });
+
+                    locksConversa.set(jid, processar);
+
                 } catch (erro) {
                     logger.error(`[ERROR] Erro ao processar mensagem: ${erro}`);
                 }
