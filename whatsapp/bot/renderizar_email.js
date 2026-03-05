@@ -14,10 +14,14 @@ function carregarFonte() {
 
     // Tenta fontes comuns em ordem de preferência
     const caminhos = [
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
+        // Alpine Linux (Dockerfile: apk add ttf-liberation)
+        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        // Debian/Ubuntu
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        // Windows
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
     ];
 
     for (const caminho of caminhos) {
@@ -36,10 +40,14 @@ function carregarFonteBold() {
     if (fontBoldData) return fontBoldData;
 
     const caminhos = [
-        "C:/Windows/Fonts/arialbd.ttf",
-        "C:/Windows/Fonts/seguisb.ttf",
+        // Alpine Linux (Dockerfile: apk add ttf-liberation)
+        "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+        // Debian/Ubuntu
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        // Windows
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/seguisb.ttf",
     ];
 
     for (const caminho of caminhos) {
