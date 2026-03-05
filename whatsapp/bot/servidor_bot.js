@@ -527,6 +527,27 @@ app.listen(PORTA, () => {
     logger.info(`[SERVER] Servidor rodando na porta ${PORTA}`);
     logger.info(`[STATUS] Status: http://localhost:${PORTA}/status`);
     logger.info(`[QR] QR Code: http://localhost:${PORTA}/qr`);
+
+    // Diagnóstico: verifica se /tmp é gravável e se o patch do Baileys foi aplicado
+    try {
+        const tmpTest = path.join(require("os").tmpdir(), "_baileys_test_" + Date.now());
+        fs.writeFileSync(tmpTest, "ok");
+        fs.unlinkSync(tmpTest);
+        logger.info(`[DIAG] /tmp gravável: OK (tmpdir=${require("os").tmpdir()})`);
+    } catch (e) {
+        logger.error(`[DIAG] /tmp NÃO gravável! ${e.message}`);
+    }
+    try {
+        const mediaSrc = fs.readFileSync(
+            path.join(process.cwd(), "node_modules/@whiskeysockets/baileys/lib/Utils/messages-media.js"),
+            "utf-8"
+        );
+        const patched = mediaSrc.includes("await once(encFileWriteStream, 'finish')");
+        logger.info(`[DIAG] Patch Baileys (await finish): ${patched ? "APLICADO ✅" : "NÃO APLICADO ❌"}`);
+    } catch (e) {
+        logger.warn(`[DIAG] Não foi possível verificar patch: ${e.message}`);
+    }
+
     iniciarWhatsApp();
 });
 

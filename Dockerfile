@@ -10,14 +10,17 @@ WORKDIR /app
 COPY package*.json ./
 COPY scripts/ ./scripts/
 
-# Instala dependencias de producao (postinstall aplica patch no Baileys)
+# Instala dependencias de producao
 RUN npm ci --only=production
+
+# Aplica patch no Baileys (fix ENOENT no upload de mídia)
+RUN node scripts/patch-baileys.js
 
 # Copia o restante do codigo
 COPY . .
 
-# Cria diretorio para persistencia (auth)
-RUN mkdir -p dados_bot/auth
+# Cria diretorio para persistencia (auth) e tmp para media do Baileys
+RUN mkdir -p dados_bot/auth /tmp
 
 EXPOSE 3001
 
