@@ -325,9 +325,9 @@ async function iniciarWhatsApp() {
                 // (Apagar auth destrói a sessão permanentemente e exige novo QR)
                 if (status === DisconnectReason.badSession) {
                     tentativasReconexao++;
-                    // Backoff mais longo: 30s, 60s, 90s, 120s (max 2 min)
-                    // BadSession geralmente é instabilidade temporária do WhatsApp server
-                    const tempoEspera = Math.min(30000 * tentativasReconexao, 120000);
+                    // Backoff mais longo: 45s, 90s, 135s, 180s (max 3 min)
+                    // BadSession geralmente significa que o WhatsApp ainda não liberou a sessão anterior
+                    const tempoEspera = Math.min(45000 * tentativasReconexao, 180000);
                     logger.error(`[BAD_SESSION] SESSAO COM PROBLEMA! Reconectando em ${tempoEspera / 1000}s (tentativa #${tentativasReconexao})...`);
                     // Registra atividade para o health check não matar o processo
                     // enquanto estamos ativamente tentando reconectar
@@ -341,9 +341,10 @@ async function iniciarWhatsApp() {
 
                 // Reconexão com delay seguro para evitar cascata de badSession (500)
                 // Se reconectar muito rápido, o WhatsApp ainda não liberou a sessão anterior
+                // Análise de logs: precisa ~90s para WhatsApp liberar; 15s reduz badSession loops
                 // 408: Timeout | 428: Precondition Required | 515: Stream Error
                 if ((statusCode === 408 || statusCode === 428 || statusCode === 515) && jaTeveConexao) {
-                    const delayReconexao = 5000; // 5s — dá tempo do WhatsApp liberar a sessão
+                    const delayReconexao = 15_000; // 15s — tempo seguro para WhatsApp liberar sessão
                     logger.warn(`[RECONNECT] Erro ${statusCode} detectado (tinha conexao). Reconexao em ${delayReconexao / 1000}s...`);
                     registrarAtividade();
                     setTimeout(iniciarWhatsApp, delayReconexao);
