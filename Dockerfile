@@ -6,10 +6,11 @@ RUN apk add --no-cache fontconfig ttf-liberation
 # Cria diretorio de trabalho
 WORKDIR /app
 
-# Copia dependencias primeiro para cachear layer
+# Copia dependencias e script de patch primeiro para cachear layer
 COPY package*.json ./
+COPY scripts/ ./scripts/
 
-# Instala dependencias de producao
+# Instala dependencias de producao (postinstall aplica patch no Baileys)
 RUN npm ci --only=production
 
 # Copia o restante do codigo

@@ -7,6 +7,7 @@
   "scripts": {
     "start": "node whatsapp/bot/servidor_bot.js",
     "dev": "node --watch whatsapp/bot/servidor_bot.js",
+    "postinstall": "node scripts/patch-baileys.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
