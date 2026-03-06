@@ -287,7 +287,12 @@ async function iniciarWhatsApp() {
                     // Backoff progressivo: 30s, 60s, 120s, 300s (max 5 min)
                     const tempoEsperaQR = Math.min(30000 * Math.pow(2, tentativasQR - 1), 300000);
                     logger.info(`[QR-WAIT] QR nao escaneado. Proxima tentativa em ${tempoEsperaQR / 1000}s (tentativa #${tentativasQR})`);
-                    setTimeout(iniciarWhatsApp, tempoEsperaQR);
+                    registrarAtividade();
+                    const heartbeatInterval = setInterval(registrarAtividade, 10000);
+                    setTimeout(() => {
+                        clearInterval(heartbeatInterval);
+                        iniciarWhatsApp();
+                    }, tempoEsperaQR);
                     return;
                 }
 
@@ -332,7 +337,14 @@ async function iniciarWhatsApp() {
                     // Registra atividade para o health check não matar o processo
                     // enquanto estamos ativamente tentando reconectar
                     registrarAtividade();
-                    setTimeout(iniciarWhatsApp, tempoEspera);
+
+                    // Continua registrando atividade periodicamente enquanto esperamos
+                    // para evitar que o Fly.io mate o processo por causa do health check
+                    const heartbeatInterval = setInterval(registrarAtividade, 10000);
+                    setTimeout(() => {
+                        clearInterval(heartbeatInterval);
+                        iniciarWhatsApp();
+                    }, tempoEspera);
                     return;
                 }
 
@@ -347,7 +359,11 @@ async function iniciarWhatsApp() {
                     const delayReconexao = 15_000; // 15s — tempo seguro para WhatsApp liberar sessão
                     logger.warn(`[RECONNECT] Erro ${statusCode} detectado (tinha conexao). Reconexao em ${delayReconexao / 1000}s...`);
                     registrarAtividade();
-                    setTimeout(iniciarWhatsApp, delayReconexao);
+                    const heartbeatInterval = setInterval(registrarAtividade, 5000);
+                    setTimeout(() => {
+                        clearInterval(heartbeatInterval);
+                        iniciarWhatsApp();
+                    }, delayReconexao);
                     return;
                 }
 
@@ -363,7 +379,17 @@ async function iniciarWhatsApp() {
                 }
 
                 logger.info(`[RETRY] Tentativa de reconexao #${tentativasReconexao} em ${tempoEspera / 1000}s...`);
-                setTimeout(iniciarWhatsApp, tempoEspera);
+
+                // Mantém registrando atividade enquanto espera
+                if (tempoEspera > 10000) {
+                    const heartbeatInterval = setInterval(registrarAtividade, 10000);
+                    setTimeout(() => {
+                        clearInterval(heartbeatInterval);
+                        iniciarWhatsApp();
+                    }, tempoEspera);
+                } else {
+                    setTimeout(iniciarWhatsApp, tempoEspera);
+                }
             }
         });
 
@@ -519,7 +545,12 @@ async function iniciarWhatsApp() {
         tentativasReconexao++;
         const tempoEspera = Math.min(5000 * tentativasReconexao, 60000);
         logger.info(`[RETRY] Tentando novamente em ${tempoEspera / 1000}s...`);
-        setTimeout(iniciarWhatsApp, tempoEspera);
+        registrarAtividade();
+        const heartbeatInterval = setInterval(registrarAtividade, 10000);
+        setTimeout(() => {
+            clearInterval(heartbeatInterval);
+            iniciarWhatsApp();
+        }, tempoEspera);
     }
 }
 
@@ -553,11 +584,17 @@ app.get("/status", (req, res) => {
     if (tempoDesdeInicio < 180_000) {
         return res.json(status);
     }
-    // Só retorna 503 se AMBAS as condições forem verdadeiras:
-    // 1. Bot está offline (whatsappPronto = false)
-    // 2. Última atividade foi há mais de 5 minutos (não é uma reconexão rápida)
-    // Isso evita que o Fly.io mate o processo durante reconexões normais (que duram segundos)
-    if (!whatsappPronto && tempoInativo > 300_000) {
+
+    // Fly.io Health Check Tolerance:
+    // Nunca retornar 503 para health check se estamos no meio de uma reconexão!
+    // Reconexões podem demorar por conta de backoff (até 5 min), mas o processo está VIVO.
+    // Retornar 503 faz o Fly.io reiniciar o container, criando um loop infinito onde
+    // nunca conseguimos reconectar e ele pede QR Code de novo.
+
+    // Só retorna 503 se passou mais de 120s de inatividade (watchdog vai matar em 10min de qualquer forma)
+    // E NÃO estamos no meio de uma reconexão (ou seja, o socket não tentou nada nos últimos 120s)
+    // Note que agora estamos renovando 'ultimaAtividade' DURANTE as esperas de reconexão
+    if (!whatsappPronto && tempoInativo > 120_000) {
         return res.status(503).json(status);
     }
     res.json(status);
