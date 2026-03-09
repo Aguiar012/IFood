@@ -1134,7 +1134,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         }
 
         // --- CANCELAMENTO (INÍCIO) ---
-        if (textoNorm.startsWith("cancelar") || textoNorm.includes("nao vou")) {
+        if (textoNorm.startsWith("cancelar") || (textoNorm.includes("nao vou") && textoNorm !== 'nao')) {
             let numeroDiaAlvo = null;
             let dataAlvo = null;
 
@@ -1249,6 +1249,13 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             await conectarBanco(c => alterarStatusAtivo(c, alunoAtual.id, true));
             atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
             return criarTexto("Robô ativado.");
+        }
+
+        // Impede que a IA tente "adivinhar" comandos a partir de palavras soltas ou respostas casuais 
+        // Exemplo: dizer "nao" não deve engatilhar o comando de cancelar almoco.
+        if (!["CONFIRMAR_CANCELAMENTO", "CONFIRMAR_SUGESTOES_BLOQUEIO", "AGUARDANDO_PRONTUARIO", "AGUARDANDO_DIAS"].includes(usuario.etapa) &&
+            ["nao", "não", "n", "sim", "s", "ok", "ta", "tá", "joia", "beleza", "blz", "valeu", "obrigado", "obrigada"].includes(textoNorm)) {
+            return criarTexto("Certo! Se precisar de alguma coisa, é só enviar o número de um comando do menu principal. 😊");
         }
 
         // -- Fallback: tenta classificar com IA (so uma vez, evitar loop) --
