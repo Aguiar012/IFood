@@ -1,0 +1,23 @@
+name: Atualizar Bot na Oracle Cloud
+
+on:
+  push:
+    branches:
+      - main # Quando houver push na versão principal
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy no Servidor Oracle
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ${{ secrets.ORACLE_USER }}
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          script: |
+            cd ~/bot
+            git pull origin main
+            docker compose down
+            docker compose up -d --build
+            docker image prune -f
