@@ -370,19 +370,26 @@ async function iniciarWhatsApp() {
                 tentativasReconexao++;
                 registrarAtividade(); // Evita health check matar durante reconexão ativa
 
-                // Se muitas tentativas rápidas, espera mais tempo
-                let tempoEspera = 3000; // 3 segundos padrão
+                // --- SOLUÇÃO DEFINITIVA CONTRA PROXY/SOCKET TRAVADO ---
+                // Se tentarmos reconectar muitas vezes seguidas sem sucesso (ex: Proxy caindo muito, Baileys "preso"),
+                // a melhor solução para servidores Dockerizados é MATAR O PROCESSO (Crash-Only Software).
+                // O Docker tem `restart: always`, então ele vai reiniciar o Node do zero, limpando a RAM, 
+                // limpando o tunnel HTTP do Proxy e recriando conexões 100% frescas.
                 if (tentativasReconexao > MAX_TENTATIVAS_RAPIDAS) {
-                    // Backoff exponencial: 10s, 20s, 40s, 80s... até 5 minutos
-                    tempoEspera = Math.min(10000 * Math.pow(2, tentativasReconexao - MAX_TENTATIVAS_RAPIDAS), 300000);
-                    logger.info(`[WAIT] Muitas tentativas. Aguardando ${tempoEspera / 1000}s antes de reconectar...`);
+                    logger.error(`[CRITICAL] Limite maximo de tentativas atingido (${tentativasReconexao}). A rede/proxy travou.`);
+                    logger.error(`[CRITICAL] MATANDO O PROCESSO! O Docker ira reinicia-lo magicamente de forma limpa...`);
+                    // Dá 1 segundinho para o log ser escrito no disco antes de matar o NodeJS
+                    setTimeout(() => process.exit(1), 1000);
+                    return;
                 }
+
+                let tempoEspera = 3000 * tentativasReconexao; // 3s, 6s, 9s...
 
                 logger.info(`[RETRY] Tentativa de reconexao #${tentativasReconexao} em ${tempoEspera / 1000}s...`);
 
                 // Mantém registrando atividade enquanto espera
                 if (tempoEspera > 10000) {
-                    const heartbeatInterval = setInterval(registrarAtividade, 10000);
+                    const heartbeatInterval = setInterval(registrarAtividade, 5000);
                     setTimeout(() => {
                         clearInterval(heartbeatInterval);
                         iniciarWhatsApp();
