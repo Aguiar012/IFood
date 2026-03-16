@@ -66,6 +66,8 @@ const fluxo = criarFluxoConversa({
 let socket = null;
 let whatsappPronto = false;
 globalThis.__ultimoQR = "";
+let timeoutConexao = null;      // Timeout de segurança para conexão
+let intervaloDeConexao = null;  // Heartbeat durante tentativa de conexão
 const mensagensProcessadas = new Set();
 const locksConversa = new Map(); // Lock por JID: impede processamento concorrente da mesma conversa
 
@@ -144,7 +146,17 @@ if (URL_PROXY) {
 // === INICIAR WHATSAPP ===
 async function iniciarWhatsApp() {
     try {
-        // Limpeza de socket antigo para não vazar memória
+        registrarAtividade(); // Marca atividade no início da reconexão
+
+        // Limpeza de timers antigos para não vazar memória
+        if (timeoutConexao) {
+            clearTimeout(timeoutConexao);
+            timeoutConexao = null;
+        }
+        if (intervaloDeConexao) {
+            clearInterval(intervaloDeConexao);
+            intervaloDeConexao = null;
+        }
         if (intervaloHeartbeat) {
             clearInterval(intervaloHeartbeat);
             intervaloHeartbeat = null;
@@ -180,7 +192,7 @@ async function iniciarWhatsApp() {
             fetchAgent: agenteProxyFetch, // undici.ProxyAgent para fetch() nativo (upload de mídia)
 
             // --- CONFIGURAÇÕES DE ESTABILIDADE ---
-            connectTimeoutMs: 120_000,        // 2 minutos para conectar (aumentado)
+            connectTimeoutMs: 60_000,         // 60s para conectar (era 120s, travava o socket)
             keepAliveIntervalMs: 25_000,      // Ping a cada 25s (mais frequente)
             defaultQueryTimeoutMs: 90_000,    // 1.5 minuto para queries
             retryRequestDelayMs: 3000,        // 3s entre tentativas
@@ -194,6 +206,18 @@ async function iniciarWhatsApp() {
         });
 
         if (memoria_whatsapp) memoria_whatsapp.bind(socket.ev);
+
+        // --- TIMEOUT DE SEGURANÇA: mata o processo se não conectar em 60s ---
+        // Evita deadlock do Baileys onde socket fica pendurado sem erro
+        timeoutConexao = setTimeout(() => {
+            if (!whatsappPronto) {
+                logger.fatal('[TIMEOUT] Conexão NÃO estabelecida em 60s. Socket travou. Matando processo...');
+                process.exit(1);
+            }
+        }, 60_000);
+
+        // Heartbeat durante tentativa de conexão (evita Global Watchdog matar prematuramente)
+        intervaloDeConexao = setInterval(registrarAtividade, 10_000);
 
         socket.ev.on("creds.update", async () => {
             try {
@@ -234,6 +258,10 @@ async function iniciarWhatsApp() {
                 ultimaConexaoBemSucedida = new Date();
                 jaTeveConexao = true;
                 registrarAtividade();
+
+                // Limpa timers de segurança da conexão (conectou com sucesso!)
+                if (timeoutConexao) { clearTimeout(timeoutConexao); timeoutConexao = null; }
+                if (intervaloDeConexao) { clearInterval(intervaloDeConexao); intervaloDeConexao = null; }
 
                 // Heartbeat: envia sinal de vida a cada 2 min para evitar erro 428 (Precondition Required)
                 // Proxy pode dropar conexões ociosas — precisa ser frequente
@@ -295,6 +323,9 @@ async function iniciarWhatsApp() {
 
             if (connection === "close") {
                 whatsappPronto = false;
+                // Limpa timers de segurança (a conexão fechou, não precisa mais do timeout)
+                if (timeoutConexao) { clearTimeout(timeoutConexao); timeoutConexao = null; }
+                if (intervaloDeConexao) { clearInterval(intervaloDeConexao); intervaloDeConexao = null; }
                 const erro = lastDisconnect?.error;
                 const status = new Boom(erro)?.output?.statusCode;
                 const motivo = DisconnectReason[status] || `Código ${status}`;
@@ -380,8 +411,10 @@ async function iniciarWhatsApp() {
                 // Análise de logs: precisa ~90s para WhatsApp liberar; 15s reduz badSession loops
                 // 408: Timeout | 428: Precondition Required | 515: Stream Error
                 if ((statusCode === 408 || statusCode === 428 || statusCode === 515) && jaTeveConexao) {
-                    const delayReconexao = 15_000; // 15s — tempo seguro para WhatsApp liberar sessão
-                    logger.warn(`[RECONNECT] Erro ${statusCode} detectado (tinha conexao). Reconexao em ${delayReconexao / 1000}s...`);
+                    // Backoff exponencial: 30s, 45s, 67s, 101s, 120s (max)
+                    // Era fixo em 15s — muito rápido, causava cascata de badSession
+                    const delayReconexao = Math.min(30_000 * Math.pow(1.5, tentativasReconexao), 120_000);
+                    logger.warn(`[RECONNECT] Erro ${statusCode} detectado (tinha conexao). Reconexao em ${Math.round(delayReconexao / 1000)}s (tentativa #${tentativasReconexao + 1})...`);
                     registrarAtividade();
                     const heartbeatInterval = setInterval(registrarAtividade, 5000);
                     setTimeout(() => {
