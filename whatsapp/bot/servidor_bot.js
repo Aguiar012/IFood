@@ -1,4 +1,4 @@
-// ELE NAO DEVE RESPONDER GRUPOS. APENAS MENSAGENS DIRETAS
+mmmmmmmmmmmmmmmmmmm// ELE NAO DEVE RESPONDER GRUPOS. APENAS MENSAGENS DIRETAS
 // VERSÃO COM MELHORIAS DE ESTABILIDADE
 
 import "dotenv/config"; // Carrega variáveis do .env automaticamente
@@ -98,6 +98,28 @@ let aguardandoQR = false; // Indica se está esperando scan de QR
 
 // Atualiza timestamp de atividade
 function registrarAtividade() { ultimaAtividade = Date.now(); }
+
+// --- GLOBAL WATCHDOG (CRASH-ONLY) ---
+// Diferente do watchdog interno do Baileys, este roda independentemente
+// para garantir que se o NodeJS travar num socket infinito ao tentar conectar,
+// ele matará o processo inteiro (acionando o restart automático do Docker).
+setInterval(() => {
+    // Dá uma colher de chá nos primeiros 2 minutos após boot
+    if (Date.now() - inicioProcesso < 120_000) return;
+    
+    // Se o bot está esperando QR ou Desligando, não considerar travado
+    if (aguardandoQR || typeof desligandoGraciosamente !== 'undefined' && desligandoGraciosamente) {
+        registrarAtividade();
+        return;
+    }
+    
+    const tempoInativo = Date.now() - ultimaAtividade;
+    // Se ficou 6 minutos seguidos completamente sem atividade (nem pings, nem eventos do baileys)
+    if (tempoInativo > 360_000) {
+        logger.fatal(`[GLOBAL WATCHDOG] DEADLOCK DETECTADO! ${Math.round(tempoInativo/60000)} minutos sem atividade na rede/logs. Matando o processo Docker...`);
+        process.exit(1);
+    }
+}, 60_000);
 
 // --- PROXY: cria UMA VEZ (reutilizado em todas as reconexões) ---
 let agenteProxy;      // http.Agent para WebSocket
@@ -239,12 +261,10 @@ async function iniciarWhatsApp() {
                     if (!socket || !whatsappPronto) return;
 
                     const tempoInativo = Date.now() - ultimaAtividade;
-                    // Se passou mais de 10 minutos sem NENHUMA atividade (nem heartbeat), conexão morreu
-                    if (tempoInativo > 600_000) {
-                        logger.error(`[WATCHDOG] Conexao inativa ha ${Math.round(tempoInativo / 60000)} min! Forcando reconexao...`);
-                        whatsappPronto = false;
-                        setTimeout(iniciarWhatsApp, 1000);
-                        return;
+                    // Se passou mais de 5 minutos sem NENHUMA atividade (nem heartbeat), conexão morreu
+                    if (tempoInativo > 300_000) {
+                        logger.error(`[WATCHDOG] Conexao inativa ha ${Math.round(tempoInativo / 60000)} min! MATANDO PROCESSO...`);
+                        process.exit(1);
                     }
 
                     // Teste ativo: tenta enviar presença e vê se funciona
@@ -330,16 +350,20 @@ async function iniciarWhatsApp() {
                 // (Apagar auth destrói a sessão permanentemente e exige novo QR)
                 if (status === DisconnectReason.badSession) {
                     tentativasReconexao++;
-                    // Backoff mais longo: 45s, 90s, 135s, 180s (max 3 min)
-                    // BadSession geralmente significa que o WhatsApp ainda não liberou a sessão anterior
-                    const tempoEspera = Math.min(45000 * tentativasReconexao, 180000);
+                    
+                    // CRASH-ONLY: Se badSession repetir 3x seguidas, o proxy/rede está podre.
+                    // Matar o processo e deixar o Docker reiniciar limpo é muito mais confiável
+                    // do que tentar reconectar internamente (que trava o Node num socket morto).
+                    if (tentativasReconexao >= 3) {
+                        logger.error(`[BAD_SESSION] ${tentativasReconexao} tentativas seguidas falharam. Proxy/rede travou.`);
+                        logger.error(`[BAD_SESSION] MATANDO PROCESSO para Docker reiniciar limpo...`);
+                        setTimeout(() => process.exit(1), 1000);
+                        return;
+                    }
+                    
+                    const tempoEspera = Math.min(45000 * tentativasReconexao, 90000);
                     logger.error(`[BAD_SESSION] SESSAO COM PROBLEMA! Reconectando em ${tempoEspera / 1000}s (tentativa #${tentativasReconexao})...`);
-                    // Registra atividade para o health check não matar o processo
-                    // enquanto estamos ativamente tentando reconectar
                     registrarAtividade();
-
-                    // Continua registrando atividade periodicamente enquanto esperamos
-                    // para evitar que o Fly.io mate o processo por causa do health check
                     const heartbeatInterval = setInterval(registrarAtividade, 10000);
                     setTimeout(() => {
                         clearInterval(heartbeatInterval);
