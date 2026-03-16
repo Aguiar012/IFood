@@ -1,4 +1,4 @@
-mmmmmmmmmmmmmmmmmmm// ELE NAO DEVE RESPONDER GRUPOS. APENAS MENSAGENS DIRETAS
+// ELE NAO DEVE RESPONDER GRUPOS. APENAS MENSAGENS DIRETAS
 // VERSÃO COM MELHORIAS DE ESTABILIDADE
 
 import "dotenv/config"; // Carrega variáveis do .env automaticamente
