@@ -9,7 +9,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 // --- Constantes ---
 const LIMITE_POR_USUARIO = 5;   // chamadas IA por usuario por dia
 const LIMITE_GLOBAL_DIARIO = 15; // chamadas IA total por dia (RPD = 20, reserva 5)
-const NOME_MODELO = "gemini-2.5-flash-lite";
+const NOME_MODELO = "gemini-3.1-flash-preview";
 
 // Pratos comuns do refeitório IFSP (baseado nos cardápios reais)
 const PRATOS_CARDAPIO_IFSP = [
@@ -85,8 +85,9 @@ COMO O SISTEMA FUNCIONA:
 - O aluno pode configurar dias, bloquear pratos, ver status e historico
 
 FORMATO DA SUA RESPOSTA:
-- Se o usuario quer EXECUTAR uma acao, responda: COMANDO:nome
-  Comandos: cancelar, status, historico, preferencia, bloquear, desbloquear, ativar, desativar
+- Se o usuario quer EXECUTAR uma acao, responda: COMANDO:nome_do_comando
+  Comandos validos base: cancelar, status, historico, preferencia, bloquear, desbloquear, ativar, desativar
+- Se for para cancelar um dia especifico, responda: COMANDO:cancelar dia_da_semana (ex: COMANDO:cancelar amanha, COMANDO:cancelar quarta)
 - Se o usuario faz uma PERGUNTA ou tem DUVIDA, responda em texto curto (1-2 frases) usando os dados do usuario
 - NUNCA responda COMANDO:ajuda para perguntas sobre o sistema. So use COMANDO:ajuda se a mensagem nao tem relacao com almoço
 
@@ -95,8 +96,8 @@ Usuario (cadastrado seg,qua,sex): "amanha vai pedir pra mim?"
 Se amanha e segunda: "Sim, amanha e segunda e voce esta cadastrado. O almoço sera pedido automaticamente de manha."
 Se amanha e sabado: "Nao, amanha e sabado e voce so esta cadastrado para seg, qua e sex."
 
-Usuario: "nao vou comer amanha"
-Resposta: COMANDO:cancelar
+Usuario: "nao vou comer amanha" ou "cancelar almoco de terca"
+Resposta: COMANDO:cancelar amanha ou COMANDO:cancelar terca
 
 Usuario: "como funciona esse bot?"
 Resposta: "O bot pede seu almoço automaticamente nos dias que voce cadastrou (antes das 8h). Se nao quiser comer algum dia, e so cancelar."
@@ -108,8 +109,8 @@ Usuario: "o que acontece se tiver peixe?"
 Se peixe esta bloqueado: "Peixe esta na sua lista de bloqueios, entao o bot nao vai pedir almoço quando o prato do dia for peixe."
 Se nao esta bloqueado: "O bot vai pedir normalmente. Se nao gosta de peixe, use o comando 'bloquear' para adicionar."
 
-Usuario: "oi tudo bem?"
-Resposta: COMANDO:ajuda
+Usuario: "oi tudo bem?" ou "bom dia"
+Resposta: (Responda de forma amigavel, curta e natural, retribuindo a saudacao e perguntando se precisa de ajuda com o almoco)
 
 REGRAS:
 - Maximo 2 frases
@@ -286,7 +287,8 @@ export function criarAssistenteIA(chaveApi, logger = console) {
             // Verifica se e um comando (formato: COMANDO:nome)
             if (resposta.toUpperCase().startsWith("COMANDO:")) {
                 const comando = resposta.slice(8).trim().toLowerCase();
-                if (COMANDOS_VALIDOS.includes(comando)) {
+                const comandoBase = comando.split(" ")[0]; // Pegar só a primeira palavra para verificação base  
+                if (COMANDOS_VALIDOS.includes(comandoBase)) {
                     const retorno = { tipo: "comando", valor: comando };
                     salvarNoCache(mensagem, "comando", comando);
                     logger.info(`[IA] Comando: "${mensagem}" -> ${comando} `);
@@ -374,5 +376,40 @@ export function criarAssistenteIA(chaveApi, logger = console) {
         }
     }
 
-    return { classificarIntencao, sugerirBloqueios };
+    /**
+     * Usa a IA para interpretar se um texto de resposta (ex: "simmm pfv", "nao quero")
+     * e uma confirmacao ou negacao, para contextos onde o bot espera Yes/No.
+     */
+    async function interpretarConfirmacao(textoUsuario) {
+        if (!textoUsuario) return "INCONCLUSIVO";
+
+        resetarSeNovoDia(contadorGlobal);
+        if (contadorGlobal.quantidade >= LIMITE_GLOBAL_DIARIO) {
+            logger.info("[IA] Limite global atingido, pulando interpretarConfirmacao.");
+            return "INCONCLUSIVO";
+        }
+
+        const prompt = `Foi perguntado ao usuario para confirmar algo com Sim ou Nao. Ele respondeu: "${textoUsuario}".
+A intencao real dele e confirmar (SIM), negar/abortar (NAO), ou esta confuso/INCONCLUSIVO?
+Responda APENAS com UMA PALAVRA: SIM, NAO ou INCONCLUSIVO.`;
+
+        try {
+            const modeloConf = clienteGemini.getGenerativeModel({
+                model: NOME_MODELO,
+                generationConfig: { maxOutputTokens: 5, temperature: 0.1 }
+            });
+            const resultado = await modeloConf.generateContent(prompt);
+            contadorGlobal.quantidade++;
+            
+            const resposta = resultado.response.text().trim().toUpperCase();
+            if (resposta.includes("SIM")) return "SIM";
+            if (resposta.includes("NAO") || resposta.includes("NÃO")) return "NAO";
+            return "INCONCLUSIVO";
+        } catch (erro) {
+            logger.error(`[IA] Erro ao interpretar confirmacao: ${erro.message || erro}`);
+            return "INCONCLUSIVO";
+        }
+    }
+
+    return { classificarIntencao, sugerirBloqueios, interpretarConfirmacao };
 }
