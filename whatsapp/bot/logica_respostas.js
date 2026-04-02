@@ -1098,12 +1098,19 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             let acao = "INCONCLUSIVO";
             if (["nao", "não", "n", "cancelar_abortar"].includes(textoNorm)) acao = "NAO";
             else if (["sim", "s", "ok", "confirmar_cancelamento", "simm"].includes(textoNorm)) acao = "SIM";
+            else if (["outro", "cancelar_outro", "outro dia", "2"].includes(textoNorm)) acao = "OUTRO_DIA";
             else acao = await assistenteIA.interpretarConfirmacao(texto);
 
             // Se clicou em Não/Cancelar
             if (acao === "NAO") {
                 atualizarUsuario(chaveUsuario, { etapa: "MENU_PRINCIPAL", dados_temporarios: {} });
                 return criarTexto("Cancelamento abortado.");
+            }
+
+            // Se quer escolher outro dia
+            if (acao === "OUTRO_DIA") {
+                atualizarUsuario(chaveUsuario, { etapa: "ESCOLHER_DIA_CANCELAMENTO", dados_temporarios: {} });
+                return criarTexto("Qual dia da semana você quer cancelar?\n\nEscreva o dia (ex: *quarta* ou *segunda*).");
             }
 
             // Se clicou em Sim
@@ -1134,7 +1141,7 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
             return criarBotoes(
                 "Por favor, confirme se deseja cancelar.",
                 "Confirmação",
-                [{ id: "confirmar_cancelamento", texto: "Sim, Cancelar" }, { id: "cancelar_abortar", texto: "Não" }]
+                [{ id: "confirmar_cancelamento", texto: "Sim, Cancelar" }, { id: "cancelar_abortar", texto: "Não" }, { id: "cancelar_outro", texto: "Outro dia" }]
             );
         }
 
@@ -1203,9 +1210,9 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
 
             if (metodo === "DIRETO") {
                 return criarBotoes(
-                    `Deseja CANCELAR o almoço de *${dataStr}*?\nAinda dá tempo de cancelar no sistema sem enviar e-mail.`,
+                    `Cancelar almoço de *${dataStr}*?`,
                     "Confirmação",
-                    [{ id: "confirmar_cancelamento", texto: "Sim, Cancelar" }, { id: "cancelar_abortar", texto: "Não" }]
+                    [{ id: "confirmar_cancelamento", texto: "Sim, Cancelar" }, { id: "cancelar_abortar", texto: "Não" }, { id: "cancelar_outro", texto: "Outro dia" }]
                 );
             }
 
@@ -1224,16 +1231,17 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
 
                 return [
                     { image: imgBuffer, caption: "📧 Este é o e-mail que será enviado ao CAE:" },
-                    criarBotoes(`Deseja solicitar o cancelamento para *${dataStr}*?`, "Confirmação", [
+                    criarBotoes(`Cancelar almoço de *${dataStr}*?`, "Confirmação", [
                                 { id: "confirmar_cancelamento", texto: "Sim, Enviar" },
-                                { id: "cancelar_abortar", texto: "Não" }])
+                                { id: "cancelar_abortar", texto: "Não" },
+                                { id: "cancelar_outro", texto: "Outro dia" }])
                 ];
             } catch (erroImg) {
                 logger.warn(`[PREVIEW] Falha ao gerar imagem: ${erroImg.message}`);
                 return criarBotoes(
-                    `Deseja enviar e-mail de cancelamento para *${dataStr}*?\n\n_Aluno: ${alunoAtual.nome} | ${prontCompleto}_`,
+                    `Cancelar almoço de *${dataStr}*?\n\n_Aluno: ${alunoAtual.nome} | ${prontCompleto}_`,
                     "Confirmação",
-                    [{ id: "confirmar_cancelamento", texto: "Sim, Enviar" }, { id: "cancelar_abortar", texto: "Não" }]
+                    [{ id: "confirmar_cancelamento", texto: "Sim, Enviar" }, { id: "cancelar_abortar", texto: "Não" }, { id: "cancelar_outro", texto: "Outro dia" }]
                 );
             }
         }
@@ -1284,21 +1292,11 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         if (textoNorm.startsWith("cancelar") || (textoNorm.includes("nao vou") && textoNorm !== 'nao')) {
             const partes = textoNorm.split(/\s+/).map(normalizar).filter(Boolean);
             
-            // Abriu o menu base "cancelar"
+            // "cancelar" sozinho -> vai direto pro proximo dia sem menu intermediario
             if (partes.length === 1 && textoNorm === "cancelar") {
                  const diasPreferidos = await conectarBanco(c => obterDiasPreferidos(c, alunoAtual.id));
                  const proxData = obterProximoDiaPreferido(new Date(), diasPreferidos, usuario.ultimaDataCancelamento);
-                 const strProxData = `${NOMES_DIAS_CURTO[proxData.getDay()]} ${formatarDDMM(proxData)}`;
-                 
-                 atualizarUsuario(chaveUsuario, { etapa: "MENU_CANCELAR_OPCOES", dados_temporarios: { proxData: proxData.toISOString() }});
-                 return criarBotoes(
-                     `Qual almoço você quer cancelar?`,
-                     "Escolha",
-                     [
-                       { id: "cancelar_prox", texto: `Amanhã/Próx (${strProxData})` },
-                       { id: "cancelar_outro", texto: "Escolher outro dia" }
-                     ]
-                 );
+                 return await processarFluxoCancelamentoDia(proxData);
             }
 
             // Ex: "cancelar quarta", "cancelar amanha"
