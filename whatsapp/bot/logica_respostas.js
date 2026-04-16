@@ -950,9 +950,12 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
         // ================= FLUXO DE CADASTRO =================
         if (!aluno) {
             if (usuario.etapa === "AGUARDANDO_PRONTUARIO") {
-                let pront = limparTexto(texto).replace(/\s+/g, "").toUpperCase().replace(/^PT/, "").replace(/\D/g, "");
-                if (!/^\d{5,12}$/.test(pront)) {
-                    return criarTexto("Formato invalido. Digite apenas números do prontuário (ex: 3029791).");
+                // Permite dígitos + X no final (dígito verificador do IFSP)
+                let pront = limparTexto(texto).replace(/\s+/g, "").toUpperCase().replace(/^PT/, "");
+                // Remove tudo que não for dígito ou X, depois garante X só no final
+                pront = pront.replace(/[^0-9X]/gi, "").replace(/X(?=.*\d)/gi, "");
+                if (!/^\d{5,12}X?$/.test(pront)) {
+                    return criarTexto("Formato invalido. Digite apenas números do prontuário (ex: 3029791 ou 303013X).");
                 }
                 atualizarUsuario(chaveUsuario, { etapa: "AGUARDANDO_DIAS", dados_temporarios: { prontuario: pront } });
                 return menuDiasSemana("Prontuário recebido! Agora escolha os *dias da semana* que voce almoca:");
@@ -987,11 +990,17 @@ export function criarFluxoConversa({ diretorioDados = "/app/data", urlBanco, log
                 });
 
                 if (!res.ok) {
-                    if (res.motivo === "NAO_ENCONTRADO") return criarBotoes(
-                        "Prontuário não encontrado na base.\n\n" +
-                        "Se você acha que deveria estar cadastrado, procure a sala do *3° Redes* para regularizar.",
-                        "", [{ id: "continuar_cadastro", texto: "Tentar De Novo" }]
-                    );
+                    if (res.motivo === "NAO_ENCONTRADO") {
+                        // BUGFIX: Reseta etapa para permitir novo prontuário
+                        // Sem isso, o usuário fica preso em AGUARDANDO_DIAS
+                        atualizarUsuario(chaveUsuario, { etapa: "AGUARDANDO_PRONTUARIO", dados_temporarios: {} });
+                        return criarBotoes(
+                            "Prontuário não encontrado na base.\n\n" +
+                            "Se você acha que deveria estar cadastrado, procure a sala do *3° Redes* para regularizar.\n\n" +
+                            "Envie seu *prontuário correto* para tentar novamente.",
+                            "", [{ id: "continuar_cadastro", texto: "Tentar De Novo" }]
+                        );
+                    }
                     if (res.motivo === "JA_VINCULADO") return criarTexto("Prontuário já vinculado a outro número.");
                     return criarTexto("Erro no sistema.");
                 }
